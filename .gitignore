@@ -12,3 +12,7 @@ hearthstone-setup.json
 *.log
 .DS_Store
 Thumbs.db
+
+# 从 HearthstoneJSON 下载的原始卡表（10MB），只在生成 passive-effects.json 时临时用。
+# 之前误提交过一次，别再进去。
+_hs-cards.json
