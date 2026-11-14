@@ -8,7 +8,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { battlecryState, cardEffects, cardNote, conditionalBattlecries, parseTags, sureBattlecry } from '../src/effects.ts';
+import { battlecryState, cardEffects, cardNote, conditionalBattlecries, parseTags, passiveOf, sureBattlecry } from '../src/effects.ts';
 import { planLethal } from '../src/lethal.ts';
 import { advise, tradeOptions } from '../src/advice.ts';
 
@@ -64,6 +64,27 @@ test('护甲法术要能读出数字 —— 战士那两张一直是 0', () => {
   assert.equal(cardEffects('CS2_029').armor, 0, '火球术不加甲');
   // 标签里的中文分支也要认（下次重新生成卡表才会用上，但别让它悄悄坏掉）
   assert.equal(parseTags('甲7').armor, 7, '甲7 要解析成 7');
+});
+
+test('持续效果要进摘要 —— 奥丁原来只剩「8/8 战吼」', () => {
+  /*
+   * 2026-11-14 报障：「还有好几张持续效果她没算，比如战士的奥丁」。
+   *
+   * 卡表摘要靠关键词提取，**一次性效果**（伤害/抽牌/奶/甲）都能提，
+   * 持续效果整类提不出来 —— 奥丁 `TTN_811` 的摘要只剩「8/8 战吼」，
+   * 真正的「每当你获得护甲，获得等量攻击力」一个字都没有。
+   *
+   * 这类效果是**乘数**不是加数：有奥丁在场，3 点甲等于 3 点场攻。
+   * 当成加数算，斩杀线会差一整条命。
+   */
+  const note = cardNote('TTN_811');
+  assert.match(note, /持续/, '奥丁的持续效果没进摘要');
+  assert.match(note, /护甲/, '摘要里没提到护甲');
+  assert.match(note, /攻击力/, '摘要里没提到换成攻击力');
+  // CORE_ / VAN_ 前缀要能归一，不然换个版本就又认不出
+  assert.equal(passiveOf('CORE_TTN_811'), passiveOf('TTN_811'), 'CORE_ 前缀没归一');
+  // 别的牌不能被误伤
+  assert.equal(passiveOf('CS2_029'), '', '火球没有持续效果');
 });
 
 test('变形、复制这些也能读到', () => {

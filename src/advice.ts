@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import type { GameSnapshot, MinionView, SideState } from './parser.ts';
 import { planLethal, heroSwing, lookupBuffCard, swingsOf, type LethalPlan } from './lethal.ts';
 import { damageSpellsInHand, lookupDamageCard } from './damage.ts';
-import { cardBody, cardEffects, cardNote, conditionalBattlecries, sureBattlecry } from './effects.ts';
+import { cardBody, cardEffects, cardNote, conditionalBattlecries, passiveOf, sureBattlecry } from './effects.ts';
 import type { FaceId } from './alerts.ts';
 
 /** 紧凑表里的条目:[名称, 费用, 类型字母, 摘要, 标签(含 f=可锻造 / p=可预备 / x=可交易), 职业, L=传说] */
@@ -111,7 +111,13 @@ function describeCard(cardId: string): { name: string; baseCost: number; type: s
   const entry = lookupCard(cardId) ?? (base ? lookupCard(base) : undefined);
   if (entry) {
     const forged = base !== null;
-    const rawNote = entry[3];
+    /*
+     * 摘要后面接持续效果（2026-11-14）。`entry[3]` 只有一次性效果 ——
+     * 奥丁的「每当你获得护甲,获得等量攻击力」不在里面，不接这一句，
+     * 模型看到的就是一张普通的 8/8。
+     */
+    const passive = passiveOf(cardId);
+    const rawNote = passive ? `${entry[3]} ${passive}` : entry[3];
     // 已锻造时摘要要重写一遍,不然她会照念牌面上那些已经不存在的代价:
     //   · 去掉「(锻造后免)」—— 括号里那笔代价已经免了,留着就是误导
     //   · 去掉独立的「锻造」词 —— 锻造过的牌不能再锻造一次

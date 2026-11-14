@@ -246,9 +246,47 @@ export function isLegendary(cardId: string): boolean {
 }
 
 /** 这张牌的摘要文字(给需要正则兜底的地方用;查不到返回空串)。 */
+/**
+ * **持续效果（光环 / 被动触发）的补丁表**（2026-11-14）。
+ *
+ * ## 为什么要单独一张表
+ *
+ * 卡表的摘要靠**关键词提取**拼出来（伤害 / 抽牌 / 奶 / 加攻 / 甲 / 召唤…），
+ * 这些全是**一次性效果**。持续效果整类都没进摘要 —— 实测奥丁（`TTN_811`）
+ * 摘要只剩「8/8 战吼」，而它真正的效果「每当你获得护甲，获得等量攻击力」
+ * 在数据里一个字都没有。
+ *
+ * ## 为什么这类必须单独标
+ *
+ * 一次性效果是**加数**（这张牌打出去 +3 伤），持续效果是**乘数**（之后每点甲都变成攻）。
+ * 当成加数算，斩杀线会差出一整条命。
+ *
+ * ## 怎么往里加
+ *
+ * 键是卡 id（`CORE_` / `VAN_` 前缀会自动归一），值是给模型看的那句话，
+ * 以「持续:」开头。**别写猜测** —— 只写卡面上确定有的效果。
+ *
+ * 彻底的办法是重新生成卡表（生成脚本 `effectNote()` 里加持续效果的提取规则），
+ * 但那需要原始 HearthstoneJSON 数据；这张表是当下就能生效的补丁。
+ */
+const PASSIVE_PATCH: Record<string, string> = {
+  // 首席执行官奥丁 8/8：每当你获得护甲，便获得等量攻击力。
+  // 战士那套「叠甲流」的支点 —— 有它在场，3 点甲法术等于 3 点场攻。
+  TTN_811: '持续:每当你获得护甲,获得等量攻击力',
+};
+
+/** 查这张牌的持续效果补丁（没有就空串）。 */
+export function passiveOf(cardId: string): string {
+  if (!cardId) return '';
+  const bare = cardId.replace(VARIANT_PREFIX, '');
+  return PASSIVE_PATCH[cardId] ?? PASSIVE_PATCH[bare] ?? '';
+}
+
 export function cardNote(cardId: string): string {
   if (!cardId) return '';
-  return lookupEntry(cardId)?.[3] ?? '';
+  const base = lookupEntry(cardId)?.[3] ?? '';
+  const extra = passiveOf(cardId);
+  return extra ? `${base} ${extra}`.trim() : base;
 }
 
 /* ---------- 条件战吼 ---------- */
