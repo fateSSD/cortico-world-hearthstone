@@ -1,0 +1,14 @@
+node_modules/
+
+# 本机运行数据：对局档案、竞技场选牌、复盘日记。仓库里不该有别人的对局。
+hearthstone-last-game.json
+hearthstone-arena.json
+hearthstone-arena-meta.json
+hearthstone-arena-plan.json
+hearthstone-games.jsonl
+hearthstone-celebrated.json
+hearthstone-setup.json
+
+*.log
+.DS_Store
+Thumbs.db

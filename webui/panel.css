@@ -1,0 +1,315 @@
+/*
+ * 陪打面板样式。只用宿主主题变量（--paper / --sheet / --ink / …），
+ * 深浅两套主题都由变量带过来，这里不写死任何颜色。
+ */
+
+.hs-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 12px;
+  background: var(--sheet);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.hs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.hs-head-text {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* 状态点：on 我方回合 / idle 对手回合 / off 没局或结束 */
+.hs-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.hs-chip::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+
+.hs-chip[data-state="on"]::before { background: var(--accent); }
+.hs-chip[data-state="idle"]::before { background: var(--warn); }
+.hs-chip[data-state="off"]::before { background: var(--line-strong); }
+
+.hs-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.hs-cell {
+  flex: 1 1 72px;
+  min-width: 72px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: var(--sheet-2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hs-cell-label {
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+
+.hs-cell-value {
+  font-size: 17px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.hs-cell-value.hs-danger { color: var(--danger); }
+
+.hs-note {
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+/* 主按钮：面板里唯一的动作，做大、做重 */
+.hs-ask {
+  appearance: none;
+  width: 100%;
+  padding: 12px 16px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: var(--accent);
+  color: var(--on-accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 120ms ease, transform 120ms ease;
+}
+
+.hs-ask:hover:not(:disabled) { filter: brightness(1.06); }
+.hs-ask:active:not(:disabled) { transform: translateY(1px); }
+
+.hs-ask:disabled {
+  background: var(--sheet-3);
+  color: var(--ink-dim);
+  cursor: default;
+}
+
+.hs-card {
+  padding: 11px 12px;
+  border-radius: 10px;
+  background: var(--bubble-bg);
+  color: var(--bubble-ink);
+  font-size: 13.5px;
+  white-space: pre-wrap;
+  border-left: 3px solid var(--line-strong);
+}
+
+.hs-card.hs-empty { color: var(--ink-dim); font-style: italic; }
+
+.hs-card.hs-kind-danger { border-left-color: var(--danger); }
+.hs-card.hs-kind-lethal { border-left-color: var(--ok); }
+.hs-card.hs-kind-trade,
+.hs-card.hs-kind-develop { border-left-color: var(--accent); }
+.hs-card.hs-kind-hold,
+.hs-card.hs-kind-idle { border-left-color: var(--line-strong); }
+
+.hs-switches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding-top: 2px;
+  border-top: 1px solid var(--line);
+}
+
+.hs-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  cursor: pointer;
+  user-select: none;
+}
+
+.hs-switch input {
+  accent-color: var(--accent);
+  margin: 0;
+  cursor: pointer;
+}
+
+.hs-switch[data-kind="primary"] span { color: var(--ink); font-weight: 600; }
+
+/*
+ * 「按谁的思路」—— 两个按钮，不是勾选框。
+ * 这里两边都是有内容的状态，没有「关掉」这一档；写成开关，
+ * 他每次都得先想一下「不勾是什么」。
+ */
+.hs-voice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+
+.hs-voice-label {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.hs-seg {
+  display: inline-flex;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.hs-seg-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 12px;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+
+.hs-seg-btn + .hs-seg-btn { border-left: 1px solid var(--line); }
+
+.hs-seg-btn.is-on {
+  background: var(--accent);
+  color: var(--paper);
+  cursor: default;
+}
+
+.hs-seg-btn:disabled:not(.is-on) { opacity: .5; cursor: default; }
+
+/* 切过去了但那边还没有东西 —— 这句话必须露在脸上，否则像按钮坏了。 */
+.hs-voice-note {
+  color: var(--ink-dim);
+  font-size: 11.5px;
+}
+
+/* ---------- 她最近想到的 ---------- */
+
+.hs-thoughts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.hs-thoughts-title {
+  font-size: 12px;
+  opacity: 0.62;
+  letter-spacing: 0.02em;
+}
+
+.hs-thoughts-empty {
+  font-size: 13px;
+  opacity: 0.5;
+}
+
+.hs-thoughts-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hs-thoughts-list li {
+  display: flex;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* 时刻窄一点、淡一点：它是定位用的，不是内容。 */
+.hs-thoughts-at {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.42;
+}
+
+.hs-thoughts-text {
+  flex: 1 1 auto;
+}
+
+/* ---------- 反馈入口 ---------- */
+
+.hs-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 4px;
+}
+
+.hs-feedback {
+  font-size: 12px;
+  color: var(--ink);
+  opacity: 0.5;
+  text-decoration: none;
+  border-bottom: 1px dotted currentColor;
+}
+
+.hs-feedback:hover {
+  opacity: 0.85;
+}
+
+/* ---------- 这局你来打 ---------- */
+
+.hs-selfplay {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.hs-selfplay-btn {
+  align-self: flex-start;
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--sheet);
+  color: var(--ink);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.hs-selfplay-btn:hover:not(:disabled) {
+  border-color: var(--ink);
+}
+
+.hs-selfplay-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.hs-selfplay-note {
+  font-size: 12px;
+  line-height: 1.5;
+  opacity: 0.55;
+}
+
+.hs-selfplay-note.is-ok { opacity: 0.85; }
+.hs-selfplay-note.is-bad { opacity: 0.85; }
