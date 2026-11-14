@@ -114,7 +114,7 @@ test('没连上日志时,工具回执给的是怎么把日志打开,不是一句
   assert.match(text, /Power\.log|没有进行中的对局/);
 });
 
-test('扩展页:两盏灯、一块面板、三组配置、一份提示词模板', () => {
+test('扩展页:两盏灯、两块面板、三组配置、一份提示词模板', () => {
   const world = definition.create(fakeContext());
   const ui = world.webUi('zh');
   assert.equal(ui.label, '炉石陪打');
@@ -139,10 +139,21 @@ test('扩展页:两盏灯、一块面板、三组配置、一份提示词模板'
   assert.ok(ui.config[0].schema.properties['worlds.hearthstone.keepCards'], '要能配核心牌名单');
 
   // 面板:非自动模式下他唯一的问法就是这一下。
-  assert.equal(ui.panels.length, 1);
+  assert.equal(ui.panels.length, 2);
   assert.equal(ui.panels[0].id, 'main');
   assert.equal(ui.panels[0].defaultOpen, true);
   assert.equal(typeof ui.invoke, 'function', '面板没有数据面就只是个空壳');
+
+  // 第二块是「形象包」。
+  //
+  // 2026-11-14:她会蹦迪/律动/捂着耳朵摇,那些动作不在宿主里,在形象包里。
+  // 宿主 act() 认不出就 return false —— 脸变、人不动、不报错。而装包的入口在换装页,
+  // 跟这个世界隔了两层,没人会自己想到去那儿找。所以说明必须写在这页上。
+  assert.equal(ui.panels[1].id, 'figure');
+  assert.ok(ui.panels[1].title.includes('形象包'), '面板标题要能一眼看出是装什么的');
+  for (const word of ['形象包', '换装', 'data/figures']) {
+    assert.ok(ui.panels[1].description.includes(word), `说明里必须提到「${word}」—— 少一个他就装不上`);
+  }
   assert.equal(ui.promptDocs[0].role, 'envPrompt');
   assert.ok(ui.promptDocs[0].path.endsWith('ENV_PROMPT.md'));
   const varNames = ui.promptDocs[0].vars.map((v) => v.name).sort();
