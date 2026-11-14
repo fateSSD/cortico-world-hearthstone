@@ -21,6 +21,16 @@ export interface CardEffects {
   /** 战吼造成多少伤害(0 = 没有)。 */
   battlecry: number;
   /**
+   * **这张牌给多少点护甲**（0 = 没有）。
+   *
+   * 2026-11-14 补。原来这个字段根本不存在 —— 战士那几张护甲法术
+   * （放出鳄鱼 `TIME_873` 甲10、清理污染 `YOG_502` 甲3）在结构化数据里是**全 0**，
+   * 于是算斩杀时对手那 10 点甲等于不存在，她会说「能斩」而其实打不死。
+   *
+   * 触发这次的是一个真实报障：「打了一把战士，最后一回合她又迷惑了（我的法术效果）」。
+   */
+  armor: number;
+  /**
    * 战吼有前提(「如果你装备着武器」「如果你控制着其他鱼人」之类)。
    *
    * 标签里写成 `b2?`,摘要里写成「战吼需装备武器」。**有条件就不能当确定伤害用** ——
@@ -73,7 +83,7 @@ export interface CardEffects {
 }
 
 const EMPTY: CardEffects = {
-  battlecry: 0, battlecryConditional: false, battlecryCondition: null,
+  battlecry: 0, armor: 0, battlecryConditional: false, battlecryCondition: null,
   deathrattle: 0, spellPower: 0, ignoreTaunt: false, lifesteal: false, forge: false,
   prepare: false, tradeable: false,
 };
@@ -156,6 +166,7 @@ export function parseTags(raw: string | undefined): CardEffects {
         out.battlecry = n || 0;
         out.battlecryConditional = conditional;
         break;
+      case '甲': out.armor = n || 0; break;
       case 'd': out.deathrattle = n || 0; break;
       case 's': out.spellPower = n || 0; break;
       case 't': out.ignoreTaunt = true; break;
@@ -176,6 +187,17 @@ export function cardEffects(cardId: string): CardEffects {
   const note = entry?.[3] ?? '';
   // 吸血从摘要兜底:标签里没有这一项,而法术的吸血拿不到运行时 tag。
   if (/吸血/.test(note)) fx.lifesteal = true;
+  /*
+   * 护甲也走摘要兜底（2026-11-14）。
+   *
+   * 生成脚本里那条 `/获得\s*(\d+)\s*点护甲/` 是后加的，而现有卡表是加之前生成的 ——
+   * 实测 14,316 张牌里标签带「甲」的 **0 张**。但摘要里有（「甲10 召唤」），
+   * 所以从摘要里捞：`parseTags` 那条中文分支等下次重新生成卡表才会用上。
+   */
+  if (!fx.armor) {
+    const armor = /甲\s*(\d+)/.exec(note);
+    if (armor) fx.armor = Number(armor[1]) || 0;
+  }
   // 前提写在摘要里(「战吼需装备武器」),标签里那个 `?` 只说明"有前提"、不含内容
   const cond = /战吼需([^\s]+)/.exec(note);
   if (cond) {

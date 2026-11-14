@@ -32,7 +32,7 @@ const snap = (me, foe) => ({
 
 test('标签串能解析成完整字段', () => {
   const base = {
-    battlecry: 0, battlecryConditional: false, battlecryCondition: null,
+    battlecry: 0, armor: 0, battlecryConditional: false, battlecryCondition: null,
     deathrattle: 0, spellPower: 0, ignoreTaunt: false, lifesteal: false, forge: false,
     prepare: false, tradeable: false,
   };
@@ -48,6 +48,22 @@ test('法术的吸血从卡面摘要兜底 —— 它拿不到运行时标签', 
   // 9 血面对 8 点场攻时它是唯一活路,漏掉吸血就等于漏掉这条命。
   assert.equal(cardEffects('BE_183').lifesteal, true, '起源大厅:吸血');
   assert.equal(cardEffects('CS2_029').lifesteal, false, '火球术不吸血');
+});
+
+test('护甲法术要能读出数字 —— 战士那两张一直是 0', () => {
+  /*
+   * 2026-11-14 报障：「打了一把战士，最后一回合她又迷惑了（我的法术效果）」。
+   * 那一局手牌里有「放出鳄鱼」(甲10) 和「清理污染」(甲3)，而 cardEffects 返回的
+   * 结构里**根本没有 armor 这个字段** —— 算斩杀时那 10 点甲等于不存在。
+   *
+   * 卡表的标签里也没写（生成脚本那条规则是后加的，这份卡表没重新生成），
+   * 所以走摘要兜底：摘要写着「甲10 召唤」。
+   */
+  assert.equal(cardEffects('TIME_873').armor, 10, '放出鳄鱼:获得 10 点护甲');
+  assert.equal(cardEffects('YOG_502').armor, 3, '清理污染:获得 3 点护甲');
+  assert.equal(cardEffects('CS2_029').armor, 0, '火球术不加甲');
+  // 标签里的中文分支也要认（下次重新生成卡表才会用上，但别让它悄悄坏掉）
+  assert.equal(parseTags('甲7').armor, 7, '甲7 要解析成 7');
 });
 
 test('变形、复制这些也能读到', () => {

@@ -152,10 +152,19 @@ function describeCard(cardId: string): { name: string; baseCost: number; type: s
  */
 function handNote(cardId: string, prepared: boolean): string {
   const note = describeCard(cardId)?.note ?? '';
-  if (!prepared || !note) return note;
+  /*
+   * **把「甲10」摊开成「10 点护甲」**（2026-11-14）。
+   *
+   * 卡表摘要里护甲写成缩写「甲10」，结构化字段那边原来根本没有 armor 这一项
+   * （`effects.ts` 已补）。两处一缺一缩写，模型看到的就是一个读不懂的词 ——
+   * 实测报障：「打了一把战士，最后一回合她又迷惑了（我的法术效果）」，
+   * 那一局的手牌里有「放出鳄鱼」（甲10）、「清理污染」（甲3）。
+   */
+  const plain = note.replace(/甲(\d+)/g, '$1 点护甲');
+  if (!prepared || !plain) return plain;
   // 已预备:前面标状态,并去掉那个裸的「预备」词 ——
   // 它已经预备过了,再留着会让人以为还能预备一次(每张牌只能预备一次)。
-  return `已预备,费用已减·${note.replace(/(?:^|\s)预备(?=\s|$)/g, ' ').replace(/\s+/g, ' ').trim()}`;
+  return `已预备,费用已减·${plain.replace(/(?:^|\s)预备(?=\s|$)/g, ' ').replace(/\s+/g, ' ').trim()}`;
 }
 
 /**
