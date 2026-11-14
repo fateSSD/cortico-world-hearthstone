@@ -275,11 +275,41 @@ const PASSIVE_PATCH: Record<string, string> = {
   TTN_811: '持续:每当你获得护甲,获得等量攻击力',
 };
 
-/** 查这张牌的持续效果补丁（没有就空串）。 */
+/**
+ * 自动生成的持续效果表（`src/data/passive-effects.json`）。
+ *
+ * 2026-11-14 从 HearthstoneJSON 批量提取：只要原文里有**「本局对战的剩余时间内」**
+ * 就是整局持续效果（「本回合的剩余时间内」是临时的，不算）。一共 38 张在卡表里。
+ *
+ * 为什么单独成文件而不是塞进 cards.json：cards.json 是生成物，重建一次就覆盖了；
+ * 这张表跟着源码走，重建卡表也不会丢。
+ */
+let passiveAuto: Record<string, string> | null = null;
+
+function loadPassiveAuto(): Record<string, string> {
+  if (passiveAuto) return passiveAuto;
+  try {
+    const file = fileURLToPath(new URL('./data/passive-effects.json', import.meta.url));
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as { effects?: Record<string, string> };
+    passiveAuto = raw.effects ?? {};
+  } catch {
+    passiveAuto = {};
+  }
+  return passiveAuto;
+}
+
+/**
+ * 查这张牌的持续效果（没有就空串）。
+ *
+ * 手工表 `PASSIVE_PATCH` 优先 —— 自动提取的措辞是卡面原文，有时太长或不够直白。
+ */
 export function passiveOf(cardId: string): string {
   if (!cardId) return '';
   const bare = cardId.replace(VARIANT_PREFIX, '');
-  return PASSIVE_PATCH[cardId] ?? PASSIVE_PATCH[bare] ?? '';
+  const manual = PASSIVE_PATCH[cardId] ?? PASSIVE_PATCH[bare];
+  if (manual) return manual;
+  const auto = loadPassiveAuto();
+  return auto[cardId] ?? auto[bare] ?? '';
 }
 
 export function cardNote(cardId: string): string {
