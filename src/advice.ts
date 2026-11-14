@@ -2369,6 +2369,27 @@ export function buildModelPrompt(s: GameSnapshot, opts: AdviceOptions = {}): str
     `对手:${s.opponent.heroClass || '职业未知'} ${s.opponent.health} 血${s.opponent.armor ? ` ${s.opponent.armor} 护甲` : ''};场面 ${board(s.opponent)};手牌 ${s.opponent.handCount} 张(看不到);牌库 ${s.opponent.deckCount} 张`,
   ];
   if (s.me.spellPower) lines.push(`我场上法术伤害 +${s.me.spellPower}`);
+  /*
+   * **手牌里的 buff 该贴给谁**（2026-11-14）。
+   *
+   * 报障：「buff 情况的牌她都没有反应」。查下来 buff 在整条链上只出现在
+   * **斩杀计算**里（`lethal.buffs` → 斩杀序列、`buffDamage`），一旦这回合斩不了，
+   * 她一个字都不提 —— 手牌里躺着一张「+2攻」，场上还有随从，建议里当它不存在。
+   *
+   * 这里只补**事实**：哪张能打、贴给谁、贴完变多少。贴不贴是她自己的判断。
+   */
+  const myMinions = s.me.minions.length ? s.me.minions : [];
+  const usableBuffs = (s.me.handCards ?? [])
+    .map((c) => lookupBuffCard(c.cardId))
+    .filter((b): b is NonNullable<ReturnType<typeof lookupBuffCard>> => !!b && b.atk > 0 && b.cost <= s.me.mana);
+  if (usableBuffs.length && myMinions.length) {
+    const best = [...myMinions].sort((a, b) => b.atk - a.atk)[0]!;
+    const first = usableBuffs[0]!;
+    lines.push(
+      `手牌里有 buff:${usableBuffs.slice(0, 2).map((b) => `${b.name}(${b.cost}费 +${b.atk}攻)`).join('、')}`
+      + ` —— 贴给${minionLabel(best)}能变成 ${best.atk + first.atk}/${best.health}。`,
+    );
+  }
   if (keptInHand) {
     lines.push('注:标了「核心牌」的是玩家留着做配合的牌 —— 除非这回合能直接斩杀,否则不要建议提前打出去。');
   }

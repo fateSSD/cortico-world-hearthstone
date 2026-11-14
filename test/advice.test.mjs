@@ -1728,3 +1728,48 @@ test('斩杀要说清「多少点去撞墙了」—— 不然听起来像全砸�
   assert.equal(open.kind, 'lethal');
   assert.doesNotMatch(open.text, /撞墙/, `对面空场还提过墙是废话：${open.text}`);
 });
+
+test('手牌里有 buff 就要说出「贴给谁、变多少」—— 原来只在斩杀路径上提', () => {
+  /*
+   * 2026-11-14 报障：「buff 情况的牌她都没有反应」。
+   *
+   * 查下来 buff 整条链上只出现在**斩杀计算**里（lethal.buffs / buffDamage），
+   * 这回合斩不了，她一个字都不提 —— 手牌里躺着一张英勇圣印，场上还有随从，
+   * 给模型的局面描述里当它不存在。
+   *
+   * 现在只补**事实**：哪张能打、贴给谁、贴完多少。贴不贴是她自己的判断。
+   */
+  const s = snap(
+    side({
+      mana: 3,
+      // 英勇圣印：3 费 +3 攻
+      handCards: [{ id: 1, cardId: 'AT_074', cost: 3 }],
+      minions: [minion({ id: 10, name: '步兵', atk: 2, health: 4 })],
+    }),
+    side({ playerId: 2, isLocal: false }),
+  );
+  const prompt = buildModelPrompt(s);
+  assert.match(prompt, /手牌里有 buff/, '没提到手牌里有 buff');
+  assert.match(prompt, /英勇圣印/, '没说出是哪张');
+  assert.match(prompt, /5\/4/, '没算出贴完是 5/4（2+3 攻）');
+});
+
+test('水晶不够的 buff 不该出现在提示里', () => {
+  const s = snap(
+    side({
+      mana: 1,
+      handCards: [{ id: 1, cardId: 'AT_074', cost: 3 }],  // 3 费，只有 1 水晶
+      minions: [minion({ id: 10, name: '步兵', atk: 2, health: 4 })],
+    }),
+    side({ playerId: 2, isLocal: false }),
+  );
+  assert.doesNotMatch(buildModelPrompt(s), /手牌里有 buff/, '打不出来的 buff 不该提');
+});
+
+test('场上没随从时 buff 一文不值，别提', () => {
+  const s = snap(
+    side({ mana: 5, handCards: [{ id: 1, cardId: 'AT_074', cost: 3 }], minions: [] }),
+    side({ playerId: 2, isLocal: false }),
+  );
+  assert.doesNotMatch(buildModelPrompt(s), /手牌里有 buff/, '空场贴不了 buff，不该提');
+});
