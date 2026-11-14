@@ -1773,3 +1773,24 @@ test('场上没随从时 buff 一文不值，别提', () => {
   );
   assert.doesNotMatch(buildModelPrompt(s), /手牌里有 buff/, '空场贴不了 buff，不该提');
 });
+
+test('+N/+N 的 buff 要把血量一起算进去', () => {
+  /*
+   * 2026-11-14：buff 表原来只有 [名称, 费用, 攻击力] —— `+2/+2` 的牌
+   * 被记成「+2攻」，贴上去只会说「变 5/4」而实际是「5/6」。
+   *
+   * 斩杀数字不受影响（血不加伤害），但**描述错了**，他会照着错的数判断。
+   */
+  const s = snap(
+    side({
+      mana: 2,
+      // 加固：2 费 +2/+2
+      handCards: [{ id: 1, cardId: 'AT_068', cost: 2 }],
+      minions: [minion({ id: 10, name: '步兵', atk: 3, health: 4 })],
+    }),
+    side({ playerId: 2, isLocal: false }),
+  );
+  const prompt = buildModelPrompt(s);
+  assert.match(prompt, /加固/, '没说出牌名');
+  assert.match(prompt, /5\/6/, '没算出 3+2 / 4+2 = 5/6');
+});

@@ -18,7 +18,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { GameSnapshot, MinionView, SideState } from './parser.ts';
 import { damageSpellsInHand, type DamageCard } from './damage.ts';
-import { cardEffects, cardName } from './effects.ts';
+import { cardEffects, cardName, passiveOf } from './effects.ts';
 
 /** 目标的称呼:日志名 → 卡表 → 「未知随从」。别把内部 id 拼进她念的句子。 */
 const targetLabel = (m: { name?: string; cardId?: string }): string =>
@@ -29,9 +29,17 @@ export interface BuffCard {
   name: string;
   cost: number;
   atk: number;
+  /**
+   * 顺带加多少生命（`+2/+2` 里的第二个 2）。
+   *
+   * **不参与斩杀计算** —— 血不加伤害。但它决定「贴完变成几比几」这句话说得对不对：
+   * 加固是 `+2/+2`，说成「变 5/4」而实际是「5/6」，他会照着错的数判断该不该贴。
+   * 2026-11-14 补。
+   */
+  health: number;
 }
 
-type BuffEntry = [string, number, number];
+type BuffEntry = [string, number, number, number?];
 
 let buffTable: Record<string, BuffEntry> | null = null;
 
@@ -56,7 +64,7 @@ function lookupBuff(cardId: string): BuffEntry | undefined {
 /** 查一张加攻牌。给「卡名兜底」用:衍生牌不在主卡表里,只在这张表里。 */
 export function lookupBuffCard(cardId: string): BuffCard | undefined {
   const entry = lookupBuff(cardId);
-  return entry ? { cardId, name: entry[0], cost: entry[1], atk: entry[2] } : undefined;
+  return entry ? { cardId, name: entry[0], cost: entry[1], atk: entry[2], health: entry[3] ?? 0 } : undefined;
 }
 
 /** 手牌里能给自己随从加攻击力的 buff。 */
@@ -340,6 +348,27 @@ export function planLethal(snapshot: GameSnapshot): LethalPlan {
     caveats.push(armorSpell
       ? `场上有奥丁（每点护甲变等量攻击力）：手牌里的${armorSpell.name ?? '护甲牌'}能白送一份打脸攻击，这部分**没算进上面那个数**`
       : '场上有奥丁（每点护甲变等量攻击力）：这回合的护甲来源没算进去');
+  }
+  /*
+   * **场上其余持续效果，逐个点名**（2026-11-14）。
+   *
+   * 奥丁上面单独处理（它唯一能直接变成伤害）。其余的光环改变的是**场上随从的值**：
+   * 「你的图腾拥有+2攻击力」让每个图腾多 2 点场攻，「你的所有机械拥有突袭」让新上场的
+   * 机械立刻能打 —— 这些都真切影响这回合能打出多少，但要把它们算准，得对每张光环
+   * 单独建模（哪些随从算图腾？机械是这回合才下的吗？）。
+   *
+   * 这条链的规矩是「宁可说少」：所以写进 caveats 而不是改 `faceAtk`。
+   * 她说得出这句，就不会给出一个偏低的数还以为自己算全了。
+   *
+   * 最多两条 —— 三条以上会把重点淹掉，而一局同时挂三张光环本来就少见。
+   */
+  const otherPassives = me.minions
+    .filter((m) => (m.cardId || '').replace(/^(CORE_|VAN_)/, '') !== 'TTN_811')
+    .map((m) => ({ name: m.name || '场上随从', text: passiveOf(m.cardId || '') }))
+    .filter((x) => x.text)
+    .slice(0, 2);
+  for (const x of otherPassives) {
+    caveats.push(`${x.name}:${x.text.replace(/^持续:/, '')} —— 这部分没算进去`);
   }
 
   return {

@@ -230,3 +230,26 @@ test('没有奥丁时不该冒出奥丁那句', () => {
   };
   assert.doesNotMatch(planLethal(s).caveats.join(' | '), /奥丁/, '空场也报了奥丁');
 });
+
+test('场上其他持续效果也要点名（不只奥丁）', () => {
+  /*
+   * 2026-11-14：奥丁单独处理了，但「你的图腾拥有+2攻击力」这类
+   * 同样影响这回合能打多少 —— 图腾在场上就白多 2 点场攻。
+   *
+   * 不去建模每张光环（哪些算图腾、机械是不是这回合下的），
+   * 而是在 caveats 里点名。这条链的规矩是宁可说少。
+   */
+  const s = {
+    startedAt: '', turn: 9, activePlayerId: 1, isMyTurn: true, step: '', ended: false, result: null,
+    me: side({
+      mana: 2,
+      minions: [minion({ id: 7, cardId: 'CORE_REV_921', name: '锻石师', atk: 5, health: 4 })],
+      handCards: [],
+    }),
+    opponent: side({ playerId: 2, isLocal: false }),
+    boardAttack: { mine: 0, theirs: 0 },
+  };
+  const said = planLethal(s).caveats.join(' | ');
+  assert.match(said, /锻石师/, '没点名锻石师');
+  assert.match(said, /图腾/, '没说出它的效果');
+});

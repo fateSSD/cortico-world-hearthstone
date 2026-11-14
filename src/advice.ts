@@ -143,7 +143,14 @@ function describeCard(cardId: string): { name: string; baseCost: number; type: s
   if (dmg) return { name: dmg.name, baseCost: dmg.cost, type: '法术', note: `伤害${dmg.damage}`, forge: false, forged: false, prepare: false, tradeable: false };
 
   const buff = lookupBuffCard(cardId);
-  if (buff) return { name: buff.name, baseCost: buff.cost, type: '法术', note: `+${buff.atk}攻`, forge: false, forged: false, prepare: false, tradeable: false };
+  if (buff) {
+    /*
+     * `+2/+2` 要写成两边（2026-11-14）。原来只写「+2攻」，
+     * 而加固那种牌的实际效果是同时加 2 血 —— 他照着摘要判断该不该贴，会低估。
+     */
+    const note = buff.health > 0 ? `+${buff.atk}/+${buff.health}` : `+${buff.atk}攻`;
+    return { name: buff.name, baseCost: buff.cost, type: '法术', note, forge: false, forged: false, prepare: false, tradeable: false };
+  }
 
   return null;
 }
@@ -2386,8 +2393,8 @@ export function buildModelPrompt(s: GameSnapshot, opts: AdviceOptions = {}): str
     const best = [...myMinions].sort((a, b) => b.atk - a.atk)[0]!;
     const first = usableBuffs[0]!;
     lines.push(
-      `手牌里有 buff:${usableBuffs.slice(0, 2).map((b) => `${b.name}(${b.cost}费 +${b.atk}攻)`).join('、')}`
-      + ` —— 贴给${minionLabel(best)}能变成 ${best.atk + first.atk}/${best.health}。`,
+      `手牌里有 buff:${usableBuffs.slice(0, 2).map((b) => `${b.name}(${b.cost}费 +${b.atk}${b.health > 0 ? `/+${b.health}` : '攻'})`).join('、')}`
+      + ` —— 贴给${minionLabel(best)}能变成 ${best.atk + first.atk}/${best.health + first.health}。`,
     );
   }
   if (keptInHand) {
