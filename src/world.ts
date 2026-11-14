@@ -524,6 +524,14 @@ export class HearthstoneWorld implements World {
   /** 已经报过「轮到我」的最大回合号,避免同回合重复开口。 */
   private lastAnnouncedTurn = -1;
   /**
+   * 心跳用：最近一次「日志里读到新的回合号」的时刻，和那次的回合号。
+   *
+   * 为什么要存状态，见 `logTailHasTurn` 的注释 —— 判据不能只看窗口里有没有 TURN，
+   * 因为窗口是**字节窗**，日志写得快时 TURN 会被挤出去。
+   */
+  private heartbeatTurn = -1;
+  private heartbeatAt = 0;
+  /**
    * 上一条建议推的是哪张牌，以及它连着被推了几个回合。
    *
    * 2026-10-30 实测：一局里 T11–T19 连着五个回合都推「大力扣杀」，她跟着说了五遍。
@@ -1392,8 +1400,26 @@ export class HearthstoneWorld implements World {
    *   · 对局中:上一个 COMPLETE 之后已经写了好多 TURN → 真
    *   · 打完回菜单:最后一条是 COMPLETE,后面没有 TURN → 假
    *
-   * 窗口取 64KB。取 2KB 会误判 —— 日志单行就一两百字节,2KB 只有十几行,
-   * 最近的 TURN 常常在窗口之外(2026-10-29 实测:明明还在对局中却判成 false)。
+   * ## 2026-11-14：这条判据本身又踩了一个坑，改成「回合号变过没有」
+   *
+   * 上面那个「TURN 在 COMPLETE 之后」看着没问题，但**窗口是滑动字节窗，不是时间窗**。
+   * 实测：对局卡在第 3 回合一动不动（挂机 / 掉线 / 对面不来），日志照样每秒写几百字节
+   * （网络、心跳），64KB 一满，那条 TURN 就滑出窗外 —— 判定从 true 翻 false，
+   * 下一批日志又把窗口滚了滚，TURN 又进来了 —— 于是**每 15~20 秒翻一次**。
+   *
+   * 症状就是日志里刷屏：
+   *   16:37:43 手牌禁行带 开 / 16:38:07 关 / 16:38:19 开 / 16:38:49 关 …
+   * 而且每次翻转都往页面发一条 `{t:'skip'}` —— 页面收不到（接收端已删），
+   * 功能上无害，但一天几千条噪音，真出问题时反而看不见有用的话。
+   *
+   * 现在改成记状态：窗口里读到的**最大回合号**变了，就算「有新回合」，记下时刻；
+   * 之后 120 秒内都算在对局中。因为「回合号变了」这件事不依赖窗口位置 ——
+   * 只要它变过一次，那一刻就被记住了。
+   *
+   * - 对局中：每回合 `TURN value` +1 → 持续续命
+   * - 挂机 / 卡住：回合号不变 → 120 秒后自然熄灭（和原来想要的效果一致）
+   * - 打完回菜单：换局时回合号会变小（新局从 1 开始），也算「变过」，同样续一次命，
+   *   然后 120 秒内没有新回合就灭 —— 不会像原来那样卡在 true
    */
   private logTailHasTurn(): boolean {
     const path = this.tail?.currentPath;
@@ -1409,10 +1435,23 @@ export class HearthstoneWorld implements World {
       fd = openSync(path, 'r');
       readSync(fd, buf, 0, len, from);
       const tail = buf.toString('latin1');
-      const turn = tail.lastIndexOf('tag=TURN value=');
-      if (turn < 0) return false;
-      const ended = tail.lastIndexOf('tag=STATE value=COMPLETE');
-      return turn > ended;
+      // 窗口里可能出现好几个 TURN（历史回合），取最大的那个当「现在打到第几回合」。
+      let maxTurn = -1;
+      for (const m of tail.matchAll(/tag=TURN value=(\d+)/g)) {
+        const n = Number(m[1]);
+        if (n > maxTurn) maxTurn = n;
+      }
+      if (maxTurn < 0) {
+        // 窗口里一条都没有 —— 可能是刚开局还没写，也可能是缩了。按「最近一次见到」算。
+        return this.heartbeatAt > 0 && Date.now() - this.heartbeatAt < 120_000;
+      }
+      // 变了（增、或换局后变小）都算「有新回合」，续一次命。
+      if (maxTurn !== this.heartbeatTurn) {
+        this.heartbeatTurn = maxTurn;
+        this.heartbeatAt = Date.now();
+        return true;
+      }
+      return this.heartbeatAt > 0 && Date.now() - this.heartbeatAt < 120_000;
     } catch {
       return false;
     } finally {
