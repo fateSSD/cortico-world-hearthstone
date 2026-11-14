@@ -194,3 +194,39 @@ test('冻结的随从不能咬人,不该算进「能换掉我几只」', () => {
 test('空场就是 0', () => {
   assert.equal(worstCaseFaceAttack(side({ minions: [] }), side({ isLocal: false })), 0);
 });
+
+test('奥丁在场要点名 —— 护甲变攻击力那部分没算进总数', () => {
+  /*
+   * 2026-11-14：报障提到「战士的奥丁（之后获得甲都会加攻）」。
+   *
+   * 奥丁给的是**英雄攻击力**，走 heroSwing（max(heroAttack, weapon.atk)），
+   * 所以打出护甲法术等于白送一份打脸攻击。但护甲法术和直伤共享水晶，
+   * 要算进 total 就得重排整条费用分配 —— 算错一次比说少一次糟。
+   * 所以只点名、不改数，让它自己判断。
+   */
+  const s = {
+    startedAt: '', turn: 9, activePlayerId: 1, isMyTurn: true, step: '', ended: false, result: null,
+    me: side({
+      mana: 3,
+      minions: [minion({ id: 5, cardId: 'TTN_811', name: '首席管理官奥丁', atk: 8, health: 8 })],
+      // 盾牌格挡：3 费 +5 甲
+      handCards: [{ id: 1, cardId: 'CS2_102', cost: 3, name: '盾牌格挡' }],
+    }),
+    opponent: side({ playerId: 2, isLocal: false }),
+    boardAttack: { mine: 0, theirs: 0 },
+  };
+  const plan = planLethal(s);
+  const said = plan.caveats.join(' | ');
+  assert.match(said, /奥丁/, 'caveats 里没点名奥丁');
+  assert.match(said, /护甲/, '没说明护甲会变攻击力');
+});
+
+test('没有奥丁时不该冒出奥丁那句', () => {
+  const s = {
+    startedAt: '', turn: 9, activePlayerId: 1, isMyTurn: true, step: '', ended: false, result: null,
+    me: side({ mana: 3, minions: [minion({ id: 5, atk: 3, health: 3 })], handCards: [] }),
+    opponent: side({ playerId: 2, isLocal: false }),
+    boardAttack: { mine: 0, theirs: 0 },
+  };
+  assert.doesNotMatch(planLethal(s).caveats.join(' | '), /奥丁/, '空场也报了奥丁');
+});

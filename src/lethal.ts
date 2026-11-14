@@ -324,6 +324,23 @@ export function planLethal(snapshot: GameSnapshot): LethalPlan {
   if (spellPower > 0) caveats.push(`直伤已计入场上 +${spellPower} 法术伤害`);
   if (ignoreTaunt) caveats.push('我方有无视嘲讽的随从,过墙这一步按跳过算');
   caveats.push('战吼伤害、光环、随从亡语都没算进去');
+  /*
+   * **持续效果里会影响斩杀的那几张，逐一点名**（2026-11-14）。
+   *
+   * 上一句笼统说「光环没算」，模型看到等于没看到 —— 它不知道场上是哪张光环、
+   * 也不知道那张光环值多少伤害。奥丁是最典型的：每点护甲变 1 点攻击力，
+   * 有他在场，一张 3 费加 3 甲的牌等于白送 3 点打脸攻击。
+   *
+   * **只提示、不改 `total`**：护甲法术和直伤共享水晶，算进去要重排整条费用分配；
+   * 而算错一次比说少一次糟得多（这个文件的开头就写着这条）。所以让它自己判断。
+   */
+  const odynOnBoard = me.minions.some((m) => (m.cardId || '').replace(/^(CORE_|VAN_)/, '') === 'TTN_811');
+  if (odynOnBoard) {
+    const armorSpell = (me.handCards ?? []).find((c) => cardEffects(c.cardId).armor > 0 && c.cost <= me.mana);
+    caveats.push(armorSpell
+      ? `场上有奥丁（每点护甲变等量攻击力）：手牌里的${armorSpell.name ?? '护甲牌'}能白送一份打脸攻击，这部分**没算进上面那个数**`
+      : '场上有奥丁（每点护甲变等量攻击力）：这回合的护甲来源没算进去');
+  }
 
   return {
     swingsTotal,
