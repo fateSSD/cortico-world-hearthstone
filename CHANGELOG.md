@@ -1,5 +1,11 @@
 # 更新日志
 
+## 0.6.1 — 2026-11-14
+
+0.6.0 推上去卡在 npm 的 staging 里 —— `409 Cannot publish over previously staged version`，
+registry 一直不认它（`versions` 里没有，`dist-tags.latest` 还是 0.5.2）。内容与 0.6.0 完全相同，
+只是换了个版本号重发。下面 0.6.0 那节照旧有效。
+
 ## 0.6.0 — 2026-11-14
 
 **撤掉宿主补丁。** 这一版是往回退，不是加功能。
