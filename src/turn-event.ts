@@ -57,6 +57,11 @@ export function composeTurnEvent(
   advice: boolean,
   /** 核心牌名单,透传给 `briefAdvice` —— 它需要用这个把 combo 核心从「按费打」里摘出来。 */
   keepCards: string | string[] = [],
+  /**
+   * 这回合要避开的牌名（上一张连推了两次、他没打的）。透传给 `briefAdvice`。
+   * 判据在 `world.ts` 里算 —— 这里只负责传，不判断「该不该避」。
+   */
+  avoid: string[] = [],
 ): ComposedTurn {
   // 只认同一回合:跨回合的数字绝不能混进同一句话
   const sameTurn = latest && latest.turn === point.turn ? latest : null;
@@ -65,7 +70,7 @@ export function composeTurnEvent(
   if (usable) {
     const base = turnText(usable);
     if (!advice) return { text: base, hasAdvice: false, defer: false };
-    const brief = briefAdvice(usable, { keepCards });
+    const brief = briefAdvice(usable, { keepCards, avoid });
     // `建议[scared]:` —— 方括号里是表情 id。她在 `pet_say` 里写成 `<scared>`;
     // 直接写在 `建议:` 后面是为了不占额外一行,也避免被当成正文念出来。
     const face = brief.face ? `[${brief.face}]` : '';

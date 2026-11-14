@@ -955,7 +955,13 @@ export class HearthstoneWorld implements World {
         this.advicePickStreak = 0;
         this.turnAdvice.clear();
       }
-      const composed = composeTurnEvent(point, snapshot, this.cfg.adviceInTurn !== false, this.cfg.keepCards);
+      // 连着推了两次、他还没打的那张，这一回合换一张。
+      //
+      // `advicePickStreak` 是「上一次」生成时的计数（`withRepeatNote` 在生成之后才更新），
+      // 所以读到 2 表示「已经连推两回合」，正好是第三回合该换的时候。
+      // 阈值取 2 不是 3：第二遍还能换个角度说，第三遍再说同一句就是唠叨了。
+      const avoid = this.advicePickStreak >= 2 && this.lastAdvicePick ? [this.lastAdvicePick] : [];
+      const composed = composeTurnEvent(point, snapshot, this.cfg.adviceInTurn !== false, this.cfg.keepCards, avoid);
       if (!composed.defer) {
         this.lastAnnouncedTurn = snapshot.turn;
         // 记下这回合推的是哪张，对局结束时和实际动作对齐写进归档。

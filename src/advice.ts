@@ -483,7 +483,7 @@ function isKept(cardId: string, name: string | null, keep: string[]): boolean {
  */
 const isCoinId = (cardId: string): boolean => /COIN|GAME_005/i.test(cardId);
 
-export function readHand(side: SideState, keep: string[] = []): HandCardView[] {
+export function readHand(side: SideState, keep: string[] = [], avoid: string[] = []): HandCardView[] {
   const out: HandCardView[] = [];
   // 硬币也是钱:手上有几个硬币,这一回合就多几点可花。
   const coins = side.coinMana ?? side.coinCount ?? 0;
@@ -514,7 +514,21 @@ export function readHand(side: SideState, keep: string[] = []): HandCardView[] {
     });
   }
   // 能打出的排前面,同组里核心牌往后让、贵的在前(优先考虑把水晶用满)
-  return out.sort((a, b) => Number(b.playable) - Number(a.playable) || Number(a.keep) - Number(b.keep) || b.cost - a.cost);
+  //
+  // **被避开的牌排到最前一组之外（2026-11-14）**：他连着两回合没打的那张，
+  // 第三回合不该还是它 —— 原来只在文本后面加一句「你已经推了 N 个回合」，
+  // 建议本身没变，等于劝得更勤而已。用户的原话是「别这样连续推」。
+  //
+  // 放在 playable 之后、keep 之前：能打的照样优先（不能因为要避开它而推一张打不起的），
+  // 但同样能打的里面，换一张。
+  const avoided = (n: string | null | undefined): number =>
+    n && avoid.some((x) => x && (n === x || n.includes(x) || x.includes(n))) ? 1 : 0;
+  return out.sort((a, b) =>
+    Number(b.playable) - Number(a.playable)
+    || avoided(a.name) - avoided(b.name)
+    || Number(a.keep) - Number(b.keep)
+    || b.cost - a.cost,
+  );
 }
 
 /** 这回合真正能花的水晶(含硬币)。 */
@@ -1160,6 +1174,13 @@ export function aoeCombos(snapshot: GameSnapshot): AoeCombo[] {
 export interface AdviceOptions {
   /** 核心牌名单:牌名或卡牌 ID,逗号分隔。见 `parseKeepCards`。 */
   keepCards?: string | string[];
+  /**
+   * 这回合要避开的牌名 —— 上一张连推了两次、他没打的。
+   *
+   * 排序时把命中这些名字的牌排到同组最后（`readHand`），不是剔除：
+   * 手牌里只剩它能打的时候照样推它，否则等于什么都不建议。
+   */
+  avoid?: string[];
 }
 
 export interface Advice {
@@ -1178,7 +1199,7 @@ export interface Advice {
 export function advise(snapshot: GameSnapshot, opts: AdviceOptions = {}): Advice {
   const keep = parseKeepCards(opts.keepCards);
   const lethal = planLethal(snapshot);
-  const hand = readHand(snapshot.me, keep);
+  const hand = readHand(snapshot.me, keep, opts.avoid ?? []);
   const trades = tradeOptions(snapshot);
   const combined = combinedTrades(snapshot);
   const threat = threatInfo(snapshot);
