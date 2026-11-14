@@ -351,6 +351,16 @@ export interface ActionRecord {
    * 光有 `text`(「打出 德雷阿佳丝」)判不了这些,事后也没法从快照倒推。
    */
   cardId?: string;
+  /**
+   * 这一步涉及的实体 id。**只给「当时还叫不出名字」的动作用**（见 `backfillActionNames`）。
+   *
+   * 为什么需要它：对手出牌那一瞬间，日志里给不出 cardId，也还没有 entityName ——
+   * 于是 `text` 只能是「打出 未知的牌」。但几十毫秒后随从落地，`FULL_ENTITY Updating`
+   * 会带上真实名字。留着 id，等名字到了再回来补一遍，就不必永远念「未知的牌」。
+   *
+   * 实测 2026-11-14：一局 43 次对手出牌里有 17 次读不出（39%），她复盘时说不出对面出了什么。
+   */
+  entityId?: number;
   cost?: number;
   atk?: number;
   health?: number;
@@ -1174,9 +1184,31 @@ export class PowerLogParser {
       who: playerId === null ? 'unknown' : playerId === localId ? 'me' : 'opponent',
       kind,
       text,
+      // 名字这一瞬间可能还没有（对手出牌常见）。留给 backfill 补，别就此定稿。
+      entityId,
       ...extra,
     });
     this.trimHistory();
+  }
+
+  /**
+   * 把「未知的牌」用实体后来的名字补上。
+   *
+   * 对手出牌那一刻，日志里既没有 cardId 也没有 entityName —— 只有实体 id。
+   * 随从落地之后 `FULL_ENTITY - Updating` 才把名字补进实体表。
+   * 每个快照前跑一遍，回填过的不会再匹配（`text` 里已经没有「未知的牌」）——
+   * 幂等，几十条动作遍历一遍是微秒级。
+   */
+  private backfillActionNames(): void {
+    for (const a of this.actions) {
+      if (a.entityId === undefined || !a.text.includes('未知的牌')) continue;
+      const e = this.entities.get(a.entityId);
+      if (!e) continue;
+      const name = e.name || cardName(e.cardId ?? '');
+      if (!name) continue;
+      a.text = a.text.replace('未知的牌', name);
+      if (e.cardId && !a.cardId) a.cardId = e.cardId;
+    }
   }
 
   private trimHistory(): void {
@@ -1252,6 +1284,9 @@ export class PowerLogParser {
 
   snapshot(): GameSnapshot | null {
     if (!this.sawCreateGame) return null;
+    // 先把「打出 未知的牌」用实体后来的名字补一遍：对手出牌那一刻还没有名字，
+    // 落地几十毫秒后才有。每回合都会重算快照，所以这里补最省事，也是幂等的。
+    this.backfillActionNames();
     if (!this.explicitLocalId && this.detectedLocalId === null) this.detectLocalByHand();
 
     const localId = this.localPlayerId();
@@ -1354,10 +1389,15 @@ export class PowerLogParser {
           handCards.push({
             id: e.id,
             cardId: e.cardId,
-            // 日志里的实体名。**必须留着**:卡表只收可收集牌,衍生物(`BE_327t` 秘典翻译官、
-            // `VAC_323t2` 麦芽岩浆)在里面查不到,只拿 cardId 去查就会念出一串 ID ——
-            // 实测 2026-10-24 手牌里冒过 `BE_327t(4费)` 这种,他说「她在说乱码」。
-            name: e.name ?? '',
+            // 先日志里的实体名，再回退卡表。
+            //
+            // **回退这一步 2026-11-14 补的**：原来只写 `e.name ?? ''`，
+            // 而实测有一手牌 `cardId=CORE_DS1_185`（奥术射击，卡表里明明白白）读出来名字是空 ——
+            // 起手摸到的牌在日志里常常只有 cardId、没有 entityName 标签。
+            // 名字空了她就没法说「打奥术射击」，只能跳过这张，等于白丢一手牌。
+            // 反过来也不能只用卡表：衍生物（`BE_327t`、`VAC_323t2`）卡表里查不到，
+            // 只有日志的实体名能念出来。所以是「先实体名、再卡表」。
+            name: e.name || cardName(e.cardId) || '',
             cost: tagNum(e, 'COST', 0),
             prepared: tagOn(e, 'PREPARE'),
             enteredTurn: e.enteredTurn,
