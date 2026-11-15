@@ -2427,30 +2427,36 @@ export class HearthstoneWorld implements World {
           state: this.cfg.mode === 'quiet' ? 'offline' : 'online',
           hint: this.cfg.mode === 'quiet' ? t.lampQuiet : t.lampNormal,
         },
+        /**
+         * 形象包。这盏灯不报状态，是**说明**。
+         *
+         * 为什么放灯里而不是面板里：面板要前端构建产物（见 panels 上面的注释），
+         * 而灯的 `hint` 是悬停就能看全的纯文本 —— 这是首页上唯一能放长句、
+         * 又不用动宿主前端的地方。
+         *
+         * 判断不了「装没装」：扩展的 `ctx.dataDir` 和 companion 那个 `data/figures/`
+         * 不是一个地方，读不到。所以不装作假状态，常亮，把话说明白。
+         */
+        {
+          label: '形象包',
+          state: 'online',
+          hint: '她会蹦迪、律动、捂着耳朵摇 —— 那些动作不在宿主里，在形象包里，宿主认不出就丢掉（脸变、人不动、不报错）。'
+            + '装法：换装页「导入形象包」选 zip，或者把文件夹解压到 data/figures/<名字>/ 再在列表里选中它。'
+            + '**装和用是两步**，只装不选等于没装。',
+        },
       ],
       // 一块面板,只干三件事:看局面、要建议、切开关。
       // 非自动模式(mode=quiet)下这就是唯一的问法 —— 他不用再去聊天框打字。
+      //
+      // **别加第二块。** 2026-11-14 试过加一块 `figure`，界面直接报「面板产物中没有 figure，
+      // 可用面板：main」—— 宿主的 WebUI 是预构建的（`dist/web/`），每个 panel id 都要在
+      // 前端源码里有对应组件，跑过 `pnpm build:web` 才算数。扩展这边声明一个新 id，
+      // 前端没有那个组件，就是这条错。形象包的事改放灯和链接里（见上下的 lamps / links）。
       panels: [{
         id: 'main',
         title: '陪打',
         description: '一眼看局面,点一下让她说这回合怎么打。',
         defaultOpen: true,
-      }, {
-        /**
-         * 形象包。
-         *
-         * 为什么这件事值得占一页:她「会摇头晃脑」不是宿主的能力，是形象包的。
-         * 宿主 `act()` 遇到不认识的词只会 `return false` —— **脸变、人不动、不报错**，
-         * 用户看到的就是「动作不太好使」。而装包的入口在换装页，跟这个世界隔了两层，
-         * 谁也不会自己想到去那儿找。
-         *
-         * 文字放在 `description` 里：页签上一定会显示，不依赖前端怎么渲染 `invoke` 的返回值。
-         */
-        id: 'figure',
-        title: '形象包',
-        description: '她会蹦迪、律动、捂着耳朵摇 —— 这些动作**不在宿主里，在形象包里**。'
-          + '装法：换装页「导入形象包」选 zip，或者把文件夹解压到 data/figures/<名字>/ 再在列表里选中它。'
-          + '不装也能打牌，只是那些动作发下去没人演。',
       }],
       invoke: (panel, method, args) => this.panelInvoke(panel, method, args),
       config: hearthstoneConfigGroups(),
