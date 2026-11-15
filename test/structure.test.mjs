@@ -154,8 +154,8 @@ test('扩展页:三盏灯、一块面板、三组配置、一份提示词模板'
   for (const word of ['形象包', '换装', 'data/figures']) {
     assert.ok(figureLamp.hint.includes(word), `灯的说明里必须提到「${word}」—— 少一个他就装不上`);
   }
-  // 装包入口要能点到（`#/dress` 是应用内换装页）
-  assert.ok(ui.links.some((l) => l.href === '#/dress'), '要有去换装页的入口');
+  // 装包入口要能点到（`/#/dress` 是应用内换装页；斜杠少了宿主会丢弃这条链接）
+  assert.ok(ui.links.some((l) => l.href === '/#/dress'), '要有去换装页的入口');
   assert.equal(ui.promptDocs[0].role, 'envPrompt');
   assert.ok(ui.promptDocs[0].path.endsWith('ENV_PROMPT.md'));
   const varNames = ui.promptDocs[0].vars.map((v) => v.name).sort();

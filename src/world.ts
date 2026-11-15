@@ -2534,10 +2534,12 @@ export class HearthstoneWorld implements World {
       // 反馈入口:点开进 QQ 邮箱,地址写在按钮上可以直接抄。
       // 放在 World 页比藏在 README 里管用 —— 想反馈的人那时正盯着这个页面。
       //
-      // `#/dress` 是应用内换装页的路由。上面那块「形象包」说的是「装什么」，
+      // `/#/dress` 是应用内换装页的路由（**斜杠不能少**：宿主 `isSafeLinkHref()`
+      // 只放行 `/` 开头的相对路径或能 `new URL()` 解析的完整地址，`#/dress` 会被丢弃
+      // 并报一条「href 不安全」——2026-11-15 修）。上面那块「形象包」说的是「装什么」，
       // 这里给的是「去哪儿装」—— 光有说明没有入口，等于让人自己找。
       links: [
-        { label: '装形象包 → 换装页', href: '#/dress', inheritTheme: true },
+        { label: '装形象包 → 换装页', href: '/#/dress', inheritTheme: true },
         FEEDBACK_LINK,
       ],
     };
