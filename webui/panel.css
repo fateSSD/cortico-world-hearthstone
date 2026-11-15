@@ -313,3 +313,47 @@
 
 .hs-selfplay-note.is-ok { opacity: 0.85; }
 .hs-selfplay-note.is-bad { opacity: 0.85; }
+
+/*
+ * 「灯怎么看」。默认折叠。
+ *
+ * 颜色一律走宿主变量 —— 这个文件开头写着「深浅两套主题都由变量带过来，
+ * 这里不写死任何颜色」。`--ok` / `--ink-dim` / `--danger` 正好对上绿/灰/红三态。
+ */
+.hs-help {
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+}
+.hs-help summary {
+  cursor: pointer;
+  list-style: none;
+  color: var(--ink-soft);
+}
+.hs-help summary::-webkit-details-marker { display: none; }
+.hs-help summary::before { content: '\25B8  '; }
+.hs-help[open] summary::before { content: '\25BE  '; }
+.hs-help summary:hover { color: var(--ink); }
+.hs-help ul {
+  margin: 8px 0 0;
+  padding-left: 2px;
+  list-style: none;
+  line-height: 2;
+  color: var(--ink-soft);
+}
+.hs-help li b { color: var(--ink); font-weight: 600; }
+.hs-help-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.hs-help-which {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  line-height: 1.85;
+  color: var(--ink-dim);
+}

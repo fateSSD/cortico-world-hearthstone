@@ -10,6 +10,14 @@
 
 const TEXT = {
   zh: {
+    helpTitle: '扩展名旁边那三盏灯怎么看？',
+    helpOn: '绿',
+    helpOnDesc: '上一次是好的，正常。',
+    helpOff: '灰',
+    helpOffDesc: '没启用，不是坏了 —— 比如模式调成了「安静」，或者这局已经打完了。不用管。',
+    helpErr: '红',
+    helpErrDesc: '读不到对局，要去处理。原因和怎么办，鼠标停在灯上能看到。',
+    helpWhich: '三盏灯分别是：日志（读得到对局吗）、模式（她会自动开口还是等你说）、形象包（蹦迪、律动那些动作要装包，宿主认不出就丢掉）。',
     turn: (n) => `第 ${n} 回合`,
     myTurn: '轮到你',
     foeTurn: '对手回合',
@@ -49,6 +57,14 @@ const TEXT = {
     feedback: '报 bug / 提需求',
   },
   en: {
+    helpTitle: 'What do the three dots next to the extension name mean?',
+    helpOn: 'Green',
+    helpOnDesc: 'last time worked. Normal.',
+    helpOff: 'Grey',
+    helpOffDesc: 'not enabled — that is not a fault. Quiet mode, or the match already ended. Nothing to do.',
+    helpErr: 'Red',
+    helpErrDesc: 'cannot read the match. Hover the dot for the reason and the fix.',
+    helpWhich: 'The three are: log (can it read the match), mode (does she speak up by herself), figures (dance and bounce moves need a figure pack).',
     turn: (n) => `Turn ${n}`,
     myTurn: 'your turn',
     foeTurn: 'their turn',
@@ -130,6 +146,35 @@ function el(doc, tag, cls, content) {
   return node;
 }
 
+/**
+ * 「灯怎么看」。默认折叠。
+ *
+ * 灯是宿主画在扩展名旁边的，原因只在悬停时出现 —— **没人知道要悬停**。
+ * 面板里得有块能查的地方。
+ *
+ * 颜色一律走宿主的变量（这个文件的规矩是「不写死任何颜色」）：
+ * `--ok` / `--ink-dim` / `--danger` 正好是三态。
+ */
+function lampsHelp(doc, t) {
+  const box = el(doc, 'details', 'hs-help');
+  box.append(el(doc, 'summary', null, t.helpTitle));
+
+  const ul = el(doc, 'ul');
+  for (const [color, k, d] of [
+    ['var(--ok)', 'helpOn', 'helpOnDesc'],
+    ['var(--ink-dim)', 'helpOff', 'helpOffDesc'],
+    ['var(--danger)', 'helpErr', 'helpErrDesc'],
+  ]) {
+    const li = el(doc, 'li');
+    const dot = el(doc, 'span', 'hs-help-dot');
+    dot.style.background = color;
+    li.append(dot, el(doc, 'b', null, t[k]), doc.createTextNode('　' + t[d]));
+    ul.append(li);
+  }
+  box.append(ul, el(doc, 'p', 'hs-help-which', t.helpWhich));
+  return box;
+}
+
 function mount(ctx) {
   const doc = ctx.root.ownerDocument;
   const t = text(ctx.language);
@@ -206,7 +251,10 @@ function mount(ctx) {
     }, 5000);
   }, { signal: ctx.signal });
 
-  wrap.append(head, stats, button, card, voiceRow, switches, selfPlayRow, thoughtsRow, footer);
+  /* 灯说明放在最底下 —— 用户是「看到灰点、滚下来找答案」才需要它。 */
+  const helpBox = lampsHelp(doc, t);
+
+  wrap.append(head, stats, button, card, voiceRow, switches, selfPlayRow, thoughtsRow, helpBox, footer);
 
   let busy = false;
   let lastKey = '';
