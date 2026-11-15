@@ -17,6 +17,7 @@ import type {
   Logger, ToolDef, ToolTag, World, WorldHost, WorldWebUiDecl, WorldLamp, TriggerMode,
 } from 'cortico/core/types.ts';
 import { HEARTHSTONE_ID, hearthstoneConfigGroups, type HearthstoneConfigSection } from './config.ts';
+import { ensureFigurePack, type FigurePackResult } from './figure-pack.ts';
 import { PowerLogTail, describeSearch, looksLikePowerLog, resolvePowerLog } from './log-source.ts';
 import { isCoinCard, PowerLogParser, renderSnapshot, type ActionRecord, type GameSnapshot, type SideState, type TurnPoint } from './parser.ts';
 import { detectAlerts, endMarker, endText, faceOf, lethalText, startText, surpriseAlerts, toneOf } from './alerts.ts';
@@ -54,6 +55,13 @@ import type { HearthstoneText } from './i18n.ts';
  * desktop-pet 同样是用 import.meta.url 定位的,照它来。
  */
 const ENV_PROMPT_FILE = fileURLToPath(new URL('../ENV_PROMPT.md', import.meta.url));
+
+/**
+ * 随包带的形象包(动作在它里面,不在宿主里)。
+ *
+ * 定位方式同 `ENV_PROMPT_FILE`:按本文件位置算,不用 `ctx.packageDir` —— 那是 bot 的代码包。
+ */
+const FIGURE_PACK_SOURCE = fileURLToPath(new URL('../assets/figure-groove', import.meta.url));
 
 /** 庆祝记录留多少条。够挡住最近几十局,又不至于把文件养肥。 */
 const CELEBRATED_KEEP = 40;
@@ -595,6 +603,13 @@ export class HearthstoneWorld implements World {
    * 优先自己的槽位,其次复用 browser 扩展已经填过的那个(用户不必再填一次)。
    */
   private readonly llmKey: string;
+  /**
+   * 随包带的形象包装到哪一步了。
+   *
+   * 留在实例上:灯要报「没装 / 装好 / 装失败」三种状态 —— 这一版能做真状态了,
+   * 上一版那盏灯只敢把装法写出来(理由见 `figureLamp`)。
+   */
+  private figurePack: FigurePackResult | null = null;
   private readonly opts: HearthstoneWorldOptions;
 
   constructor(opts: HearthstoneWorldOptions) {
@@ -637,6 +652,9 @@ export class HearthstoneWorld implements World {
   async start(host: WorldHost): Promise<void> {
     this.host = host;
     this.log = host.log;
+    // 形象包:那组动作只能由形象包提供(宿主 `act()` 认不出的名字静默丢掉),随包带了一份。
+    // 幂等、不抛错 —— 装不上只是「她不能蹦迪」,陪打一步都不少。
+    await this.installFigurePack();
     // Power 日志默认是**关的**：开关在用户目录的 log.config 里，很多人从来没建过。
     // 没开的时候炉石只往 Power.log 写错误行，扩展读到的是个空壳——而且不报错，
     // 用户只会看到「她一句话不说」。和上面关日志上限是同一类事：装完即用，别让人翻 ini。
@@ -2405,6 +2423,46 @@ export class HearthstoneWorld implements World {
 
   /* ---------- 设置页 ---------- */
 
+  /**
+   * 把随包带的形象包装进 `figures/`。
+   *
+   * 幂等、不抛错。装不上只影响「她能不能蹦迪」，陪打一步都不少 ——
+   * 所以这里绝不把异常往上抛：`start()` 抛了，整个 World 就挂不上。
+   */
+  private async installFigurePack(): Promise<void> {
+    try {
+      this.figurePack = await ensureFigurePack({
+        dataDir: this.opts.dataDir,
+        sourceDir: FIGURE_PACK_SOURCE,
+        installer: HEARTHSTONE_ID,
+        log: this.log ?? undefined,
+      });
+    } catch (error) {
+      this.figurePack = {
+        status: 'failed',
+        dir: '',
+        version: null,
+        message: `装形象包时出了意外：${error instanceof Error ? error.message : String(error)}`,
+      };
+      this.log?.warn(this.figurePack.message);
+    }
+  }
+
+  /** 形象包那盏灯。话都写在 `figure-pack.ts` 里 —— 两包共用一份文案，不在这里再编一遍。 */
+  private figureLamp(): WorldLamp {
+    const pack = this.figurePack;
+    if (!pack) {
+      return {
+        label: '形象包',
+        state: 'loading',
+        hint: '随包带了一个形象包，启动时装进 data/figures/groove/。还没开始 —— 等她启动；'
+          + '等不及就把扩展目录里的 assets/figure-groove 拷过去，再去换装页选。',
+      };
+    }
+    const state = pack.status === 'failed' ? 'error' : pack.status === 'occupied' ? 'offline' : 'online';
+    return { label: '形象包', state, hint: pack.message };
+  }
+
   webUi(language: Language = 'zh'): WorldWebUiDecl {
     const t = hearthstoneText(language);
     const snapshot = this.lastSnapshot ?? this.parser.snapshot();
@@ -2428,22 +2486,21 @@ export class HearthstoneWorld implements World {
           hint: this.cfg.mode === 'quiet' ? t.lampQuiet : t.lampNormal,
         },
         /**
-         * 形象包。这盏灯不报状态，是**说明**。
+         * 形象包。**这一版报真状态。**
+         *
+         * 上一版只敢把装法写出来，因为它判断不了「装没装」—— 当时的结论是
+         * 「`ctx.dataDir` 和 companion 那个 `data/figures/` 不是一个地方，读不到」。这条是错的：
+         * `ctx.dataDir` 就是部署的 `data` 目录本身（`hearthstone-last-game.json` 就写在它下面），
+         * 桌宠的 `figures/` 也在那一层。所以现在装和报状态都做得到。
+         *
+         * 仍然报不出的只有一件：用户在换装页**选没选**这个形象 —— 那要读
+         * `worlds.desktop-pet.skin.figure`，是别人的配置段，不碰。所以灯只说「装好了」。
          *
          * 为什么放灯里而不是面板里：面板要前端构建产物（见 panels 上面的注释），
          * 而灯的 `hint` 是悬停就能看全的纯文本 —— 这是首页上唯一能放长句、
          * 又不用动宿主前端的地方。
-         *
-         * 判断不了「装没装」：扩展的 `ctx.dataDir` 和 companion 那个 `data/figures/`
-         * 不是一个地方，读不到。所以不装作假状态，常亮，把话说明白。
          */
-        {
-          label: '形象包',
-          state: 'online',
-          hint: '她会蹦迪、律动、捂着耳朵摇 —— 那些动作不在宿主里，在形象包里，宿主认不出就丢掉（脸变、人不动、不报错）。'
-            + '装法：换装页「导入形象包」选 zip，或者把文件夹解压到 data/figures/<名字>/ 再在列表里选中它。'
-            + '**装和用是两步**，只装不选等于没装。',
-        },
+        this.figureLamp(),
       ],
       // 一块面板,只干三件事:看局面、要建议、切开关。
       // 非自动模式(mode=quiet)下这就是唯一的问法 —— 他不用再去聊天框打字。

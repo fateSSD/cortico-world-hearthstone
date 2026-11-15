@@ -150,7 +150,9 @@ Coopanion\data\extensions\node_modules\cortico-world-hearthstone
 - **避开手牌这类「走位行为」** → 只能向 [Pal-AI-Lab/Coopanion](https://github.com/Pal-AI-Lab/Coopanion/issues)
   提需求，让宿主自己开一个接口
 
-想要前者，装「律动版大肥鱼」那类带动作的形象包就行；后者目前没有合法实现路径。
+想要前者，这个扩展**自带**「律动版大肥鱼」——`assets/figure-groove/` 里就是它（底座是 Pal-AI-Lab
+的 `whale`，加了 12 个动作），启动时自动装到 `<部署>/data/figures/groove/`，你只需要去换装页选它一次。
+形象包没有地方发（市场只收 world / bot / provider），所以只能跟着扩展走。后者目前没有合法实现路径。
 
 ---
 

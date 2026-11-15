@@ -1,0 +1,7 @@
+# 形象包里是「原样交付」的资源，不许做换行转换。
+#
+# 这台机器 `core.autocrlf=true`：不加这条，clone 出来的 `figure.js` / `figure.json`
+# 会变成 CRLF，而它们与宿主内置 whale 那一份的差异只应该有「动作实现」——
+# 换行一混进去，「只改了两个文件、其余逐字节相同」（assets/figure-groove/NOTICE.md）就成了假话。
+# 贴图是二进制，git 自己认得；要保的是这几个文本件。
+assets/figure-groove/** -text
