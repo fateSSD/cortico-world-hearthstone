@@ -68,7 +68,7 @@ const SCALE_T = `translate(${f1(128 - 128 * K)} ${f1(256 - 256 * K)}) scale(${K}
  *
  * 起落速率不匀：`|sin|` 落地即起，中间不粘地。走只是轻轻颠，不抢戏。
  */
-const HOP_RUN = 26, HOP_WALK = 7;
+const HOP_RUN = 26, HOP_WALK = 15;
 /** 弹跳高度（logo 单位）。`modeT` 不用：相位用连续帧时钟，抬起来的那一下不该因为切模式重来。 */
 const hopOf = (mode, t) => {
   const hz = mode === 'run' ? 2.4 : mode === 'walk' ? 1.7 : 0;
@@ -132,9 +132,18 @@ const HALF_LOGO = (EXTENT[2] - EXTENT[0]) / 2 * K;
  * 宿主每帧写的是 `translate(AX AY) rotate(rot) scale(kx ky) translate(-ax -ay)`，
  * 而 `toStage(lx, ly)` 是 `(lx - ax) * kx + AX` —— 所以反解时第三个平移要**加**回去（它本身已是负号）。
  */
-export function stageCenterX(petG) {
+function stagePose(petG) {
   const m = XF_RE.exec(petG?.getAttribute?.('transform') || '');
-  return m ? Number(m[1]) + (128 + Number(m[6])) * Number(m[4]) : null;
+  if (!m) return null;
+  const kx = Number(m[4]);
+  return {
+    cx: Number(m[1]) + (128 + Number(m[6])) * kx,
+    sign: kx < 0 ? -1 : 1,
+  };
+}
+
+export function stageCenterX(petG) {
+  return stagePose(petG)?.cx ?? null;
 }
 
 /**
@@ -554,8 +563,15 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
   let hopWas = null;
   /** 自己让开手牌的量：舞台像素（给阴影）与 logo 单位（给 `<g>`、包围盒、命中圈、锚点）。 */
   let avoidStage = 0, avoidLogo = 0;
-  /** 让开时抬起来的高度（logo 单位）：离目标越远抬得越高，落回 0 —— 看着是跃出去，不是平移过去。 */
-  let avoidLift = 0;
+  /** 让开时不再抬离地面（仅跨牌抛物线大跳 `leapFlight` 时按弧线抬升）。 */
+  let avoidLift = 0, avoidHold = 0, avoidEngaged = null, avoidMoving = false;
+  /*
+   * `avoidEngaged` 读作「避让已触发」：idle 站满 0.35s 才允许让开，触发之后保持触发。
+   * 它存的是**目标偏移**，每帧随宿主位置重算 —— 不是把偏移钉死。
+   * 真正「锁住落点」靠的是 `avoidSide` 的 ±20px 迟滞：落点不变，偏移跟着宿主走，
+   * 画面位置因而停在同一个地方（2026-11-16 改名，原名 `avoidLocked` 容易读成锁偏移）。
+   */
+  let avoidSide = 0, leapFlight = null;
   /** 宿主的阴影（`svg` 的第一个孩子，不在 petG 里），每帧按 BODY_SCALE 缩一次。 */
   let shadowEl = null;
   function mount(petG) {
@@ -623,20 +639,90 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
    * 目标只看宿主给的位置（`stageCenterX`）：人在带子里就推到最近的带外，出了带子就回 0。
    * 一帧走不完，用指数收敛（约 0.11s 常数）—— 直接跳过去会像瞬移，炉石那边看得一清二楚。
    */
-  function avoidStep(petG, dt) {
+  function avoidStep(petG, dt, mode) {
     const b = opts.host?.bounds?.();
     const S = b?.S > 0 ? b.S : .42;
+    const pose = stagePose(petG);
+    const stepDt = clamp(dt, 0, .05);
     let target = 0;
-    if (b?.W > 0 && handAt(b)) {
-      const cx = stageCenterX(petG);
-      const minX = 104 * S + 8, maxX = b.W - 104 * S - 8;
-      target = avoidShift(cx, b.W, HALF_LOGO * S, minX, maxX);
+
+    if (leapFlight && pose) {
+      leapFlight.t += stepDt;
+      const p = clamp(leapFlight.t / leapFlight.dur, 0, 1);
+      const curX = lerp(leapFlight.fromStage, leapFlight.toX, smooth(0, 1, p));
+      avoidStage = curX - pose.cx;
+      const peakPx = Math.min(260, Math.max(120, Math.abs(leapFlight.toX - leapFlight.fromStage) * .28));
+      avoidLift = (4 * p * (1 - p) * peakPx) / S;
+      avoidMoving = false;
+      avoidLogo = (avoidStage / S) * pose.sign;
+      if (p >= 1) {
+        leapFlight = null;
+        avoidLift = 0;
+      }
+      return avoidLogo;
     }
-    avoidStage += (target - avoidStage) * (1 - Math.exp(-clamp(dt, 0, .05) * 9));
-    if (Math.abs(avoidStage - target) < .5) avoidStage = target;
-    avoidLogo = avoidStage / S;
-    // 还差多少没走完，就抬多高（上限约 19 个舞台像素）：跃出去的那一下，落回地面时正好到位
-    avoidLift = Math.min(Math.abs(target - avoidStage) / S * .35, 46);
+
+    if (!b?.W || !handAt(b)) {
+      avoidHold = 0;
+      avoidEngaged = null;
+      avoidSide = 0;
+      leapFlight = null;
+    } else if (pose) {
+      const minX = 104 * S + 8, maxX = b.W - 104 * S - 8;
+      const l = b.W * HAND_X1 - HALF_LOGO * S;
+      const r = b.W * HAND_X2 + HALF_LOGO * S;
+      const canSpan = l < r && l >= minX && r <= maxX;
+      if (!canSpan || pose.cx <= l || pose.cx >= r) {
+        avoidHold = 0;
+        avoidEngaged = null;
+        avoidSide = 0;
+      } else {
+        const mid = b.W / 2;
+        if (mode === 'run') {
+          /*
+           * 跑的时候**顺着她的朝向**让（`pose.sign` 就是 `kx` 的符号 = 她正朝哪边跑）。
+           * 原来按「在中线哪一侧」选的是**远侧**，落地后 `avoidSide` 又按近侧翻转，
+           * 会出现「白白飞过去再飞回来」—— 2026-11-16 审查查出。
+           */
+          if (!avoidSide) avoidSide = pose.sign >= 0 ? 1 : -1;
+        } else {
+          if (!avoidSide) avoidSide = pose.cx - l < r - pose.cx ? -1 : 1;
+          else if (avoidSide === -1 && pose.cx >= mid + 20) avoidSide = 1;
+          else if (avoidSide === 1 && pose.cx <= mid - 20) avoidSide = -1;
+        }
+        const destX = avoidSide < 0 ? l : r;
+        const visualX = pose.cx + avoidStage;
+        const jumpDist = Math.abs(destX - visualX);
+        // 需要跨过大半个牌区（> 140px）时直接起抛物线飞跃过去，不踩牌面
+        if (jumpDist > 140 && (mode === 'run' || mode === 'walk')) {
+          leapFlight = { fromStage: visualX, toX: destX, t: 0, dur: .85 };
+          avoidMoving = false;
+          avoidLift = 0;
+          avoidLogo = (avoidStage / S) * pose.sign;
+          return avoidLogo;
+        }
+        if (mode === 'idle') {
+          avoidHold += stepDt;
+          if (avoidHold >= .35 || avoidEngaged !== null) {
+            avoidEngaged = destX - pose.cx;
+            target = avoidEngaged;
+          }
+        } else {
+          avoidHold = 0;
+          avoidEngaged = null;
+          target = destX - pose.cx;
+        }
+      }
+    }
+
+    const d = target - avoidStage;
+    const stepMax = 260 * stepDt;
+    if (Math.abs(d) <= stepMax) avoidStage = target;
+    else avoidStage += Math.sign(d) * stepMax;
+    avoidMoving = Math.abs(target - avoidStage) > 1;
+    // spG 在 petG 内部，受外层 scale(kx, ky) 镜像影响；面向左(sign=-1)时必须乘回符号，否则人会和影子反向劈叉
+    avoidLogo = (avoidStage / S) * (pose ? pose.sign : 1);
+    avoidLift = 0;
     return avoidLogo;
   }
   // a fade in progress: the rig crossfades every part from `tex` to fade.set's textures over fade.dur seconds
@@ -709,7 +795,7 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
   // the ninja run leans her whole body forward from the soles, in a straight line: bent at the waist instead,
   // the bodice comes away from the skirt and its bow and the tops of the legs show at the waist
   let wTilt = 0, wLean = 0, facing = 1;
-  let finMood = 0, tailMood = 0, wagAmp = 0, sitK = 0, walkK = 0, runK = 0, swingK = 0;
+  let finMood = 0, tailMood = 0, wagAmp = 0, sitK = 0, walkK = 0, walkBoostK = 0, runK = 0, swingK = 0;
   const groupTilt = (mode, tilt, lean) => tilt * wTilt + lean * wLean + runK * 14 * facing;
   const st = { z: {}, alpha: {} };
 
@@ -836,8 +922,8 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
      * `hopWas` 挡掉重复写：`f1` 已经把值收到一位小数，同值就不必再碰 attribute。
      */
     if (spG) {
-      const hop = hopOf(mode, t) + avoidLift;
-      const tx = f1(128 - 128 * K + avoidStep(petG, dt));
+      const tx = f1(128 - 128 * K + avoidStep(petG, dt, mode));
+      const hop = hopOf(mode, t) + avoidLift + (avoidMoving ? 11 * Math.abs(Math.sin(Math.PI * 2.2 * t)) : 0);
       const ty = f1(256 - 256 * K - hop);
       const sig = `${tx} ${ty}`;
       if (sig !== hopWas) {
@@ -877,8 +963,8 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
      *
      * leapT 用 modeT:滞空约 0.8~1.0 秒,按比例切三拍(起跳 / 过顶 / 收手)。
      */
-    const leapK = airborne && o.air === 'leap' ? 1 : 0;
-    const leapT = o.modeT || 0;
+    const leapK = (airborne && o.air === 'leap') || leapFlight ? 1 : 0;
+    const leapT = leapFlight ? clamp(leapFlight.t / leapFlight.dur, 0, 1) * 1.15 : (o.modeT || 0);
     /**
      * 落地那一下。`mode === 'land'` 只持续 0.6 秒，手臂/头/尾/鳍/呆毛五处都要读，
      * 和 leapK 一样必须**先声明**再使用（TDZ 是白屏级错误，`node --check` 查不出）。
@@ -957,8 +1043,11 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
       + flap * 14 * Math.sin(t * 17);
 
     /* legs: the kit hands hip→foot segments sized for Coo; keep their angle (forward = foot to the right) */
-    const legA = o.legs.map(l => -Math.atan2(l[2] - l[0], Math.max(4, l[3] - l[1])) * 180 / Math.PI);
-    const lift = o.legs.map(l => clamp(29 - Math.hypot(l[2] - l[0], l[3] - l[1]), -8, 20));
+    walkBoostK = lerp(walkBoostK, mode === 'walk' ? 1 : 0, ease(8, dt));
+    const walkGait = 1 + 1.15 * walkBoostK;
+    const avoidStepPhase = avoidMoving ? 28 * Math.sin(t * 18) : 0;
+    const legA = o.legs.map((l, i) => -Math.atan2(l[2] - l[0], Math.max(4, l[3] - l[1])) * 180 / Math.PI * walkGait + (i ? -avoidStepPhase : avoidStepPhase));
+    const lift = o.legs.map(l => clamp(29 - Math.hypot(l[2] - l[0], l[3] - l[1]), -8, 20) * (1 + .65 * walkBoostK));
     // sitting swaps the lower body for its own drawing (skirt spread on the floor, legs forward) in a
     // couple of frames halfway down, under a little squash; a long crossfade would show both skirts at once
     const sitIn = smooth(.44, .54, sitK), plop = Math.sin(Math.PI * smooth(.3, .8, sitK));
@@ -1259,7 +1348,7 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
       rig?.dispose();
       // 阴影是宿主的，人走了别把避让时加的位移留在上面
       if (shadowEl?.isConnected) shadowEl.removeAttribute('transform');
-      rig = null; canvas = null; fo = null; fxG = null; spG = null; mountedIn = null; shadowEl = null; hopWas = null; avoidStage = 0; avoidLogo = 0; avoidLift = 0;
+      rig = null; canvas = null; fo = null; fxG = null; spG = null; mountedIn = null; shadowEl = null; hopWas = null; avoidStage = 0; avoidLogo = 0; avoidLift = 0; avoidHold = 0; avoidEngaged = null; avoidMoving = false; avoidSide = 0; leapFlight = null; walkBoostK = 0;
     },
     /*
      * 包围盒与命中圈跟着 BODY_SCALE 缩。
@@ -1276,8 +1365,8 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
     reset() {
       endFade();
       for (const k in sp) { sp[k].x = 0; sp[k].v = 0; }
-      lastT = null; rootWas = {}; prevTilt = 0; prevYaw = 0; prevLow = 0; headTilt = 0; wTilt = 0; wLean = 0; finMood = 0; tailMood = 0; wagAmp = 0; sitK = 0; walkK = 0; runK = 0; swingK = 0;
-      hopWas = null; avoidStage = 0; avoidLogo = 0; avoidLift = 0;
+      lastT = null; rootWas = {}; prevTilt = 0; prevYaw = 0; prevLow = 0; headTilt = 0; wTilt = 0; wLean = 0; finMood = 0; tailMood = 0; wagAmp = 0; sitK = 0; walkK = 0; walkBoostK = 0; runK = 0; swingK = 0;
+      hopWas = null; avoidStage = 0; avoidLogo = 0; avoidLift = 0; avoidHold = 0; avoidEngaged = null; avoidMoving = false; avoidSide = 0; leapFlight = null;
       if (shadowEl?.isConnected) shadowEl.removeAttribute('transform');
       prevLook = null; prevShut = 0; Object.assign(hl, { dx: 0, dy: 0, scale: 1, quiver: 0, alpha: 1 });
     },

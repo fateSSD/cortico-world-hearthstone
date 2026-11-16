@@ -1,5 +1,14 @@
 # 更新日志
 
+## 0.8.4 — 2026-11-16（对局版形象包 1.3.4：跑的时候顺向让，不再原地往返）
+
+- **跑（`run`）时的避让方向改成顺她的朝向**（`pose.sign`，即宿主 `kx` 的符号）。
+  原来按「在中线哪一侧」选的是**远侧**，落地后 `avoidSide` 又按近侧翻转，
+  会出现「白白飞过去再飞回来」。
+- `avoidLocked` 改名 `avoidEngaged` 并写清语义：它是「避让已触发」，存的是**每帧重算的目标偏移**；
+  真正锁住落点的是 `avoidSide` 的 ±20px 迟滞，不是这个变量。
+- 形象包已同步到运行时目录（`data/figures/groove-game`，版本 1.3.4）。
+
 ## 0.8.3 — 2026-11-16（describe.json 与代码对齐，补回 selfplay）
 
 宿主 `build/cortico/src/extensions/describe.ts` 的注释原话：**索引仓的 Action 和 WebUI 的
