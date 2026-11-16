@@ -1,5 +1,17 @@
 # 更新日志
 
+## 0.8.3 — 2026-11-16（describe.json 与代码对齐，补回 selfplay）
+
+宿主 `build/cortico/src/extensions/describe.ts` 的注释原话：**索引仓的 Action 和 WebUI 的
+扩展市场只读 describe.json，不执行扩展代码**。那份 JSON 一直是手抄的，漂了不止一处：
+
+- **`hearthstone.selfplay` 代码里有、JSON 里没有** —— 市场页面上这个事件等于不存在，
+  「他在面板上按了『这局你来打』，先用 pet_ask 问一句，答应了才动手」这条规矩用户读不到。
+- 六条工具说明是旧的：`meta` / `plan` / `style` / `his_style` / `diary` / `recent`。
+- `hearthstone.mulligan`、`hearthstone.setup` 的正文也是旧的（换牌那句「过时不补」没写进去）。
+- 全部从源码重新生成（11 工具 / 8 事件）；新增 `test/describe-sync.test.mjs` 钉住一致性，
+  工具名单 / 说明 / 参数、事件名单 / trigger / 说明逐条比对，改一遍忘一边测试就红。
+
 ## 0.8.2 — 2026-11-16（她自己让开，不用人叫）
 
 上一版在日志里写「自动做不到」，这一版把它推翻了 —— 但做法和原来的补丁不是一回事，代价写在下面。

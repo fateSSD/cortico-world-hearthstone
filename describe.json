@@ -90,7 +90,7 @@
           },
           "heroClass": {
             "type": "string",
-            "description": "Class name in Chinese, e.g. 德鲁伊 / 法师 / 术士."
+            "description": "Class name in Chinese, e.g. 德鲁伊 / 法师 / 术士. Case/spacing does not matter."
           },
           "notes": {
             "type": "string",
@@ -109,7 +109,7 @@
     },
     {
       "name": "hearthstone_plan",
-      "description": "Ask a model to reason about how THIS drafted arena deck actually wins. It gets the full card list plus a written summary of the rules, and answers with an archetype (aggro/midrange/control), 2-3 concrete win lines that name real cards in the deck, and what the deck is afraid of. Costs one model call, so: read first, and only re-generate when the deck changed (a fresh draft, a swap) — never once per pick.",
+      "description": "Ask a model to reason about how THIS drafted arena deck actually wins. It gets the full card list plus a written summary of the rules, and answers with an archetype (aggro/midrange/control), 2-3 concrete win lines that name real cards in the deck, and what the deck is afraid of. Costs one model call, so: read first, and only re-generate when the deck changed (a fresh draft, a swap) — never once per pick. Requires worlds.hearthstone.llmModel to be configured with a key.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -125,7 +125,7 @@
           },
           "heroClass": {
             "type": "string",
-            "description": "Optional. The class being drafted, e.g. 德鲁伊."
+            "description": "Optional. The class being drafted, e.g. 德鲁伊. Sharpens the answer."
           },
           "force": {
             "type": "boolean",
@@ -145,7 +145,7 @@
     },
     {
       "name": "hearthstone_style",
-      "description": "Your own play style — who you are at the table, in your own words. Read it with no arguments. This is NOT a tactics sheet: which card is strong, what to play this turn, that is hearthstone_advice; how a class wins is hearthstone_meta. This file holds only what is yours. It governs exactly two things: how you talk (blunt or soft, terse or talkative, what you keep an eye on) and which line you lean toward when the advice already offers several legal plays. It can NOT override the math — if there is lethal you say so, whatever your file says; if the advice names a risk (a 0-attack wall, a deathrattle, a board clear in hand) you pass it on. Write one short first-person line at a time (`add` + `section`), or drop one that no longer holds (`drop`). Add after a match only when you made a clear misjudgement worth remembering — not every small deviation.",
+      "description": "Your own play style — who you are at the table, in your own words. Read it with no arguments. This is NOT a tactics sheet: which card is strong, what to play this turn, that is hearthstone_advice; how a class wins is hearthstone_meta. This file holds only what is yours. It governs exactly two things: **how you talk** (blunt or soft, terse or talkative, what you keep an eye on) and **which line you lean toward** when the advice already offers several legal plays. It can NOT override the math — if there is lethal you say so, whatever your file says; if the advice names a risk (a 0-attack wall, a deathrattle, a board clear in hand) you pass it on. Write one short first-person line at a time (`add` + `section`), or drop one that no longer holds (`drop`). Add after a match only when you made a clear misjudgement worth remembering — not every small deviation.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -162,7 +162,7 @@
               "dislike",
               "unsure"
             ],
-            "description": "Where it belongs: who = 我在牌桌上是什么人, push = 我倾向这么打, dislike = 我看不惯的打法, unsure = 还没想明白. Required with `add`."
+            "description": "Where it belongs: who = 我在牌桌上是什么人（口吻、话多话少、盯什么）, push = 我倾向这么打（激进/控制/贪）, dislike = 我看不惯的打法, unsure = 还没想明白. Required with `add`."
           },
           "drop": {
             "type": "string",
@@ -181,9 +181,52 @@
     },
     {
       "name": "hearthstone_his_style",
+      "description": "How HE actually plays — counted from his own match archive. Not his self-description, not your opinion. Read it with no arguments. It answers: how often he followed the advice, which classes he plays, what he played instead when he did not follow it, and how that splits between won and lost games. Every number comes with its sample size. Use it when the panel is set to his side, or when he asks \"我平时怎么打\". Two things it can NOT do: it is **correlation, not causation** (a higher follow rate in won games does not mean following advice wins), and it never overrides the math — lethal, walls and board clears still come from hearthstone_advice. The only part you may write is 「他自己补的」: what the record cannot show (he was testing a new deck, he was holding a combo piece on purpose). Use `add` for that; call with no arguments to read.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "add": {
+            "type": "string",
+            "description": "One line to append under 他自己补的 — something only he knows about how he plays, not your own stance. Under 60 characters."
+          }
+        }
+      },
+      "tags": [
+        "read",
+        "write"
+      ],
       "summary": {
-        "zh": "读他从对局记录里数出来的打法习惯（采纳率、常玩职业、没按建议走时改打了什么）；只有「他自己补的」那一节可以写。",
-        "en": "How he actually plays, counted from his own archive; only the section he dictates is writable."
+        "zh": "读他从对局里数出来的打法习惯（采纳率、常玩职业、没听建议时改打了什么）；只此一节可补他口述的东西。",
+        "en": "How he actually plays, counted from his archive; the only writable part is what he says himself."
+      }
+    },
+    {
+      "name": "hearthstone_diary",
+      "description": "Write the post-match review — why it went the way it did, in your own words. The diary file already records the facts automatically (result, both heroes' hp, lowest hp, which turns your pick and his play diverged). **Do not restate those numbers** — say what the numbers cannot: why the game turned, which single turn was the hinge, what you would look at differently next time. One entry per match. Write it after a loss or after a clear misjudgement; skip it when nothing stands out — a diary full of \"打完了\" is worse than an empty one. First person, under 120 characters, no bullet points. This is also what the panel's 「她最近想到的」 shows.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "你的复盘，第一人称，120 字以内。说「为什么」，不要重复结果和血量。"
+          },
+          "where": {
+            "type": "string",
+            "description": "可选：当时的局面，一句带过（第几回合、对什么职业）。写了对以后翻回来有用。"
+          }
+        },
+        "required": [
+          "text"
+        ]
+      },
+      "tags": [
+        "write"
+      ],
+      "summary": {
+        "zh": "每局打完记一段复盘（第一人称）：为什么赢/输、哪一手是关键。面板的感想栏读的就是这里。",
+        "en": "Writes her own post-match review; the panel reads it back."
       }
     },
     {
@@ -195,7 +238,7 @@
         "properties": {
           "limit": {
             "type": "integer",
-            "description": "How many actions to return, 1-50. Defaults to 20.",
+            "description": "How many actions to return, 1–50. Defaults to 20.",
             "minimum": 1,
             "maximum": 50
           }
@@ -258,10 +301,6 @@
         "zh": "把自动开口关掉或打开(安静看 / 恢复解说)。",
         "en": "Turns your own commentary off or on again."
       }
-    },
-    {
-      "name": "hearthstone_diary",
-      "description": "Write the post-match review in her own words: why the game turned, which single turn was the hinge, what she would look at differently next time. The diary file records the facts on its own (result, both heroes' hp, lowest hp, which turns her pick and his play diverged) — this tool adds only the judgement those numbers cannot carry. Entries land in the day's diary file and in the panel's 「她最近想到的」. Storage location is configurable, so pointing it at a synced folder puts the diary in the cloud without the extension ever uploading anything itself."
     }
   ],
   "events": [
@@ -276,8 +315,16 @@
     {
       "type": "hearthstone.mulligan",
       "description": {
-        "zh": "开局换牌阶段：起手手牌与留换建议。这一局只出现一次，过时不补。",
+        "zh": "开局换牌阶段:起手手牌与留换建议。这一局只出现一次,过时不补。",
         "en": "Opening mulligan: the starting hand and which cards to keep or toss. Once per game, and never repeated late."
+      },
+      "trigger": "flush"
+    },
+    {
+      "type": "hearthstone.selfplay",
+      "description": {
+        "zh": "他在面板上按了「这局你来打」。收到后先用 pet_ask 问一句，他答应了才动手。",
+        "en": "He pressed \"you take this one\" on the panel. Ask him in a bubble first; act only after he agrees."
       },
       "trigger": "flush"
     },
@@ -316,8 +363,8 @@
     {
       "type": "hearthstone.setup",
       "description": {
-        "zh": "炉石日志的上限刚被关掉，而炉石只在启动时读这个设置。说清「这一局还是会截断，退一次炉石再开才生效」。",
-        "en": "Hearthstone's log size cap was just lifted, but the game reads that setting only at launch. Say that this match will still truncate and that one restart of Hearthstone makes it stick."
+        "zh": "这台机器的环境不对:Coopani 版本太旧、宿主动作补丁打不上,或者找不到宿主包。附一句该怎么跟他说。",
+        "en": "Something about this machine is off: Coopani too old, host patch blocked, or host pack missing. Carries what to tell the operator."
       },
       "trigger": "flush"
     }
