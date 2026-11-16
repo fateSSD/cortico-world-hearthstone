@@ -1,15 +1,15 @@
 {
   "manifest": 2,
   "api": 2,
-  "id": "groove",
-  "version": "1.0.0",
+  "id": "groove-game",
+  "version": "1.3.0",
   "name": {
-    "zh": "DeepSeek 大肥鱼 · 律动版",
-    "en": "DeepSeek Chan · Groove"
+    "zh": "DeepSeek 大肥鱼 · 对局版",
+    "en": "DeepSeek Chan · Game"
   },
   "about": {
-    "zh": "原版大肥鱼（Pal-AI-Lab 的 whale），外加一组**形象包自己实现的动作**：蹦迪、律动、打拍子、闭眼听、跟着哼、跟拍挥、余韵、凑近听、怔住、退半步、捂耳朵听。这些动作不靠改宿主实现 —— 宿主认不出它们时走 `act()` 的 default 分支，把 `{ kind, k }` 交给形象包自己画。一个 Q 版鲸鱼娘,二头身,侧身朝右站;蓝色长发、头顶一根呆毛,头两侧各一只鲸鱼鳍,身后一条鲸鱼尾巴;服装是括号里选的那套:女仆装是女仆裙和印着配色对应厂商标志",
-    "en": "a chibi whale girl, two heads tall, standing three-quarters on facing right; long blue hair with an ahoge, a whale fin on each side of the head, and a whale tail behind; she wears the outfit picked in brackets: the maid dress is a maid dress with an apron printed with the logo of the colour scheme's vendor, the winter outfit a cape with a whale hood and a striped scarf, and the crew uniform a fast-food crew uniform with a single ponytail, a red visor and headset, a striped shirt and a red skirt"
+    "zh": "**对局版**：同一只大肥鱼，画得小一号（约 0.68 倍），点击范围也跟着收窄 —— 炉石打牌时少挡手牌、少抢点击；跑起来一蹦一蹦。**她还会自己让开**：发现有窗口盖住屏幕底部中央（打牌、看视频）时，她就挪到牌区两侧，不挡手牌也不抢点击；桌面上没东西被她挡着就不躲。也可以直接叫她站到某侧（`pet_move_to` 的 `off-hand-left` / `off-hand-right`）。原版大肥鱼（Pal-AI-Lab 的 whale），外加一组**形象包自己实现的动作**：蹦迪、律动、打拍子、闭眼听、跟着哼、跟拍挥、余韵、凑近听、怔住、退半步、捂耳朵听。这些动作不靠改宿主实现 —— 宿主认不出它们时走 `act()` 的 default 分支，把 `{ kind, k }` 交给形象包自己画。一个 Q 版鲸鱼娘,二头身,侧身朝右站;蓝色长发、头顶一根呆毛,头两侧各一只鲸鱼鳍,身后一条鲸鱼尾巴;服装是括号里选的那套:女仆装是女仆裙和印着配色对应厂商标志",
+    "en": "the same whale girl, drawn smaller (about 0.68x) with a matching narrower hit area, so she covers less of the hand while you play. a chibi whale girl, two heads tall, standing three-quarters on facing right; long blue hair with an ahoge, a whale fin on each side of the head, and a whale tail behind; she wears the outfit picked in brackets: the maid dress is a maid dress with an apron printed with the logo of the colour scheme's vendor, the winter outfit a cape with a whale hood and a striped scarf, and the crew uniform a fast-food crew uniform with a single ponytail, a red visor and headset, a striped shirt and a red skirt. she also steps clear on her own: when a window covers the bottom middle of the screen (a game, a video), she keeps out of that band, and stays put when nothing is behind her"
   },
   "author": "Mr.Q（衍生自 Pal-AI-Lab 的 whale）",
   "credits": [
@@ -1226,6 +1226,35 @@
     }
   ],
   "sounds": {},
+  "moves": [
+    {
+      "id": "off-hand-left",
+      "name": {
+        "zh": "让开手牌（左）",
+        "en": "Clear of the hand (left)"
+      },
+      "about": {
+        "zh": "走到屏幕偏左、炉石手牌区以外站定（屏宽 26% 再往左半个身位）。要她跑跳着过去就带 run。",
+        "en": "walks to a spot on the left, clear of the hand area — a quarter of the way in, then half a body further out. Pass run to have her bound over there."
+      },
+      "params": []
+    },
+    {
+      "id": "off-hand-right",
+      "name": {
+        "zh": "让开手牌（右）",
+        "en": "Clear of the hand (right)"
+      },
+      "about": {
+        "zh": "走到屏幕偏右、炉石手牌区以外站定（屏宽 74% 再往右半个身位）。要她跑跳着过去就带 run。",
+        "en": "walks to a spot on the right, clear of the hand area — three quarters of the way in, then half a body further out. Pass run to have her bound over there."
+      },
+      "params": []
+    }
+  ],
+  "needs": [
+    "windows"
+  ],
   "can": {
     "walk": true
   }

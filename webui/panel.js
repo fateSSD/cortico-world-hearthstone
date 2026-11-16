@@ -49,6 +49,9 @@ const TEXT = {
     feedbackCopied: '已复制 6316@qq.com',
     feedbackFail: '复制失败 —— 手动抄一下：6316@qq.com',
     selfPlayBtn: '这局你来打',
+    figInstall: '装形象包',
+    figReinstall: '重装形象包',
+    figInstalling: '正在装…',
     selfPlayNote: '按了之后她会气泡里问你一句，你答了才开始。她要先开着「电脑操作」才动得了手。',
     selfPlaySent: '叫她了 —— 等她气泡里问你',
     selfPlayFail: '没叫到，面板连不上服务端',
@@ -96,6 +99,9 @@ const TEXT = {
     feedbackCopied: 'Copied 6316@qq.com',
     feedbackFail: 'Copy failed — the address is 6316@qq.com',
     selfPlayBtn: 'You take this one',
+    figInstall: 'Install figure pack',
+    figReinstall: 'Install again',
+    figInstalling: 'Installing…',
     selfPlayNote: 'She will ask you in a bubble first — nothing happens until you say yes. Computer use must be enabled for her to act.',
     selfPlaySent: 'Asked her — wait for the bubble',
     selfPlayFail: 'Could not reach the server',
@@ -210,6 +216,32 @@ function mount(ctx) {
   // 感想栏：跨对局的东西，放在「这局怎么样」那一堆下面。
   const thoughtsRow = el(doc, 'div', 'hs-thoughts');
 
+  /*
+   * 形象包：那组跟随动作只有装了才存在，而形象包没地方发，只能跟着扩展走。
+   *
+   * **装的动作要他点了才发生**（2026-11-16）。原来是载入即装 —— 官方
+   * `cortico-extensions#659` 明确要求改掉：装个陪打扩展不该顺带往
+   * 桌宠的 `data/figures/` 里塞东西。所以这里只有按钮，没有自动。
+   */
+  const figureRow = el(doc, 'div', 'hs-figure');
+  const figureMsg = el(doc, 'div', 'hs-figure-msg', '');
+  const figureBtn = el(doc, 'button', 'hs-figure-btn', t.figInstall);
+  figureBtn.type = 'button';
+  figureRow.append(figureMsg, figureBtn);
+
+  figureBtn.addEventListener('click', async () => {
+    if (figureBtn.disabled) return;
+    figureBtn.disabled = true;
+    figureBtn.textContent = t.figInstalling;
+    try {
+      apply(await ctx.invoke('figure'));
+    } catch (err) {
+      showError(err);
+      figureBtn.textContent = t.figReinstall;
+      figureBtn.disabled = false;
+    }
+  }, { signal: ctx.signal });
+
   // 反馈入口放最底下，不打扰上面那块。
   const footer = el(doc, 'div', 'hs-footer');
   // 反馈入口：**点击复制邮箱**，不是 mailto。
@@ -254,7 +286,7 @@ function mount(ctx) {
   /* 灯说明放在最底下 —— 用户是「看到灰点、滚下来找答案」才需要它。 */
   const helpBox = lampsHelp(doc, t);
 
-  wrap.append(head, stats, button, card, voiceRow, switches, selfPlayRow, thoughtsRow, helpBox, footer);
+  wrap.append(head, stats, button, card, voiceRow, switches, selfPlayRow, figureRow, thoughtsRow, helpBox, footer);
 
   let busy = false;
   let lastKey = '';
@@ -428,8 +460,27 @@ function mount(ctx) {
     renderSwitches(payload.status.auto);
     renderVoice(payload.status);
     renderThoughts(payload.status.thoughts);
+    renderFigure(payload.figure);
     if (payload.advice !== undefined) renderAdvice(payload.advice);
     button.disabled = busy || payload.status.ended || !payload.status.me;
+  };
+
+  /**
+   * 形象包那一行：说清现在什么状态，**按钮一直在**（2026-11-16 改）。
+   *
+   * 之前只在 `missing` 时露出来，装过一次的人就再也看不见它 ——
+   * 面板上这一格会变成一句没法操作的话。现在按状态换字，装过就是「重装」
+   * （`force` 整格重写，包坏了靠它救）；只有「别人的包」（occupied）禁用：
+   * 覆盖别人做的东西比装不上更糟。
+   */
+  const renderFigure = (fig) => {
+    if (!fig) { figureRow.hidden = true; return; }
+    figureRow.hidden = false;
+    figureMsg.textContent = fig.message || '';
+    const blocked = fig.status === 'occupied' || fig.status === 'loading';
+    figureBtn.hidden = false;
+    figureBtn.disabled = blocked;
+    figureBtn.textContent = fig.status === 'missing' ? t.figInstall : t.figReinstall;
   };
 
   const showError = (err) => {

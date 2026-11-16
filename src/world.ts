@@ -17,7 +17,7 @@ import type {
   Logger, ToolDef, ToolTag, World, WorldHost, WorldWebUiDecl, WorldLamp, TriggerMode,
 } from 'cortico/core/types.ts';
 import { HEARTHSTONE_ID, hearthstoneConfigGroups, type HearthstoneConfigSection } from './config.ts';
-import { ensureFigurePack, type FigurePackResult } from './figure-pack.ts';
+import { ensureFigurePack, inspectFigurePack, type FigurePackResult } from './figure-pack.ts';
 import { PowerLogTail, describeSearch, looksLikePowerLog, resolvePowerLog } from './log-source.ts';
 import { isCoinCard, PowerLogParser, renderSnapshot, type ActionRecord, type GameSnapshot, type SideState, type TurnPoint } from './parser.ts';
 import { detectAlerts, endMarker, endText, faceOf, lethalText, startText, surpriseAlerts, toneOf } from './alerts.ts';
@@ -61,7 +61,7 @@ const ENV_PROMPT_FILE = fileURLToPath(new URL('../ENV_PROMPT.md', import.meta.ur
  *
  * 定位方式同 `ENV_PROMPT_FILE`:按本文件位置算,不用 `ctx.packageDir` —— 那是 bot 的代码包。
  */
-const FIGURE_PACK_SOURCE = fileURLToPath(new URL('../assets/figure-groove', import.meta.url));
+const FIGURE_PACK_SOURCE = fileURLToPath(new URL('../assets/figure-groove-game', import.meta.url));
 
 /** 庆祝记录留多少条。够挡住最近几十局,又不至于把文件养肥。 */
 const CELEBRATED_KEEP = 40;
@@ -654,7 +654,9 @@ export class HearthstoneWorld implements World {
     this.log = host.log;
     // 形象包:那组动作只能由形象包提供(宿主 `act()` 认不出的名字静默丢掉),随包带了一份。
     // 幂等、不抛错 —— 装不上只是「她不能蹦迪」,陪打一步都不少。
-    await this.installFigurePack();
+    // 那组动作只能由形象包提供。随包带了一份 —— 但**载入时不装**（2026-11-16）。
+    // 官方要求 `cortico-extensions#659`：装的动作要在面板上点，不能悄悄写盘。
+    await this.refreshFigurePack();
     // Power 日志默认是**关的**：开关在用户目录的 log.config 里，很多人从来没建过。
     // 没开的时候炉石只往 Power.log 写错误行，扩展读到的是个空壳——而且不报错，
     // 用户只会看到「她一句话不说」。和上面关日志上限是同一类事：装完即用，别让人翻 ini。
@@ -2328,6 +2330,11 @@ export class HearthstoneWorld implements World {
   private async panelInvoke(panel: string, method: string, args: unknown[]): Promise<unknown> {
     if (panel !== 'main') throw new Error(`没有这块面板:${panel}`);
     if (method === 'status') return this.panelPayload();
+    /* 装形象包：**唯一一个写动作**。载入时不再自动装（`cortico-extensions#659`）。 */
+    if (method === 'figure') {
+      await this.installFigurePack();
+      return this.panelPayload();
+    }
     if (method === 'ask') return this.panelAsk();
     if (method === 'auto') return this.panelAuto(String(args[0] ?? ''), Boolean(args[1]));
     if (method === 'voice') return this.panelVoice(String(args[0] ?? ''));
@@ -2335,7 +2342,7 @@ export class HearthstoneWorld implements World {
     throw new Error(`面板 main 没有这个方法:${method}`);
   }
 
-  private panelPayload(): { status: PanelStatus; advice: PanelAdvice | null } {
+  private panelPayload(): { status: PanelStatus; advice: PanelAdvice | null; figure: { status: string; message: string } | null } {
     const snapshot = this.lastSnapshot ?? this.parser.snapshot();
     const status = panelStatus(snapshot, this.status, {
       mode: this.cfg.mode,
@@ -2352,6 +2359,10 @@ export class HearthstoneWorld implements World {
     return {
       status,
       advice: panelAdvice(snapshot, this.cfg.keepCards),
+      /* 面板上要有个「装形象包」的按钮，就得知道现在是什么状态。 */
+      figure: this.figurePack
+        ? { status: this.figurePack.status, message: this.figurePack.message }
+        : null,
     };
   }
 
@@ -2428,6 +2439,8 @@ export class HearthstoneWorld implements World {
    *
    * 幂等、不抛错。装不上只影响「她能不能蹦迪」，陪打一步都不少 ——
    * 所以这里绝不把异常往上抛：`start()` 抛了，整个 World 就挂不上。
+   *
+   * ⚠ **只从面板按钮调**（2026-11-16）。载入时调的是 `refreshFigurePack()`。
    */
   private async installFigurePack(): Promise<void> {
     try {
@@ -2436,6 +2449,8 @@ export class HearthstoneWorld implements World {
         sourceDir: FIGURE_PACK_SOURCE,
         installer: HEARTHSTONE_ID,
         log: this.log ?? undefined,
+        // 面板按钮是明确的用户动作，同版本也重写一遍（包里坏了自己救）
+        force: true,
       });
     } catch (error) {
       this.figurePack = {
@@ -2448,6 +2463,29 @@ export class HearthstoneWorld implements World {
     }
   }
 
+  /**
+   * 启动时只**看**，不装（2026-11-16）。
+   *
+   * 载入就写盘是市集点名要求去掉的那一类行为（`cortico-extensions#659`）：
+   * 他装的是陪打扩展，不该顺带往桌宠的 `data/figures/` 里塞一个包。
+   */
+  private async refreshFigurePack(): Promise<void> {
+    try {
+      this.figurePack = await inspectFigurePack({
+        dataDir: this.opts.dataDir,
+        sourceDir: FIGURE_PACK_SOURCE,
+      });
+    } catch (error) {
+      this.figurePack = {
+        status: 'failed',
+        dir: '',
+        version: null,
+        message: `看形象包状态时出了意外：${error instanceof Error ? error.message : String(error)}`,
+      };
+      this.log?.warn(this.figurePack.message);
+    }
+  }
+
   /** 形象包那盏灯。话都写在 `figure-pack.ts` 里 —— 两包共用一份文案，不在这里再编一遍。 */
   private figureLamp(): WorldLamp {
     const pack = this.figurePack;
@@ -2455,11 +2493,14 @@ export class HearthstoneWorld implements World {
       return {
         label: '形象包',
         state: 'loading',
-        hint: '随包带了一个形象包，启动时装进 data/figures/groove/。还没开始 —— 等她启动；'
-          + '等不及就把扩展目录里的 assets/figure-groove 拷过去，再去换装页选。',
+        hint: '随包带了一个形象包，但载入时不装（装的动作要在面板上点）。点了之后装进 data/figures/groove-game/，'
+          + '装完还得去换装页把她选成「DeepSeek 大肥鱼 · 对局版」—— 装好和用上是两步。',
       };
     }
-    const state = pack.status === 'failed' ? 'error' : pack.status === 'occupied' ? 'offline' : 'online';
+    /* 未装（missing）和别人的包（occupied）都算「没启用」，不是故障；装失败才是故障。 */
+    const state = pack.status === 'failed'
+      ? 'error'
+      : (pack.status === 'occupied' || pack.status === 'missing' ? 'offline' : 'online');
     return { label: '形象包', state, hint: pack.message };
   }
 

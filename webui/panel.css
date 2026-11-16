@@ -357,3 +357,39 @@
   line-height: 1.85;
   color: var(--ink-dim);
 }
+
+/* ---------------- 形象包（2026-11-16：点了才装） ---------------- */
+
+.hs-figure {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.hs-figure-msg {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-dim, #9ca3af);
+}
+
+.hs-figure-btn {
+  align-self: flex-start;
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--sheet);
+  color: var(--ink);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.hs-figure-btn:hover:not(:disabled) {
+  border-color: var(--ink);
+}
+
+.hs-figure-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

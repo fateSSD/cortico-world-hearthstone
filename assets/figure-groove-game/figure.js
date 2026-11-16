@@ -22,6 +22,134 @@ const bump = u => Math.sin(Math.PI * clamp(u, 0, 1));
 const smooth = (a, b, x) => { const k = clamp((x - a) / (b - a), 0, 1); return k * k * (3 - 2 * k); };
 const SVGNS = 'http://www.w3.org/2000/svg';
 
+/*
+ * 对局版：整只缩到原来的 0.68 倍。
+ *
+ * ## 为什么要缩
+ *
+ * 2026-11-16，炉石打牌时她走到手牌上挡牌。作者（凡特佬）核过：宿主窗口是**整屏透明**
+ * 且永远在最上层（`electron-main.cjs` 的 `alwaysOnTop`），鼠标默认穿透
+ * （`setIgnoreMouseEvents(true, { forward })`），只有落在她 hit 圈里才会被吃掉。
+ * 也就是说：**形象包改不了窗口层级，挡不挡是位置问题，缩不缩是面积问题**。
+ * 位置宿主说了算（漫游），面积这一步是形象包唯一能动的。
+ *
+ * ## 缩的是哪一层
+ *
+ * 画布外层套一个 `<g transform>`，绕脚底（128, 256）缩 —— 脚还踩在原来那条线上，
+ * 只是人矮了、窄了，占屏面积降到约 46%（0.68²），而且不会像"整只挪走"那样
+ * 让脚的落点对不上阴影。
+ *
+ * ## 必须连 hits / extent 一起缩
+ *
+ * 宿主 `kit/body.js` 用 `custom.extent ?? EXTENT` 算包围盒、`custom.hits ?? HITS` 算命中圈，
+ * 默认值是给了原尺寸的（`EXTENT = [20,12,236,256]`、`HITS = [[128,128,108]]`）。
+ * 只缩画面不缩这两个，她画小了却还在**周围的空气**上吃点击 ——
+ * 炉石那边就多出一圈看不见的死区，比挡牌更难受。所以下面两个 getter 按同一系数缩。
+ */
+const BODY_SCALE = 0.68;
+const K = BODY_SCALE;
+/** logo 单位绕脚底（128, 256）缩放：脚不动，只往回缩。 */
+const sc = (v, base) => base + (v - base) * K;
+const scalePoint = ([x, y, r]) => (r === undefined ? [sc(x, 128), sc(y, 256)] : [sc(x, 128), sc(y, 256), r * K]);
+/** 宿主 `kit/body.js` 的默认值（`EXTENT` / `HITS`），形状照抄，缩放由 `scalePoint` 做。 */
+const EXTENT = [20, 12, 236, 256];
+const HITS = [[128, 128, 108]];
+const SCALE_T = `translate(${f1(128 - 128 * K)} ${f1(256 - 256 * K)}) scale(${K})`;
+
+/**
+ * 跑跳。
+ *
+ * 宿主官方版没有「跨手牌」那一类腾空（`airKind` 只有 drop / throw / jump，`MOVING_MODES` 里没有
+ * 我们补丁加过的 `leap`），形象包也改不了她往哪走 —— 位移是宿主 `walkTo` 的一条直线。
+ *
+ * 但**画多高**是形象包的：外层 `<g>` 的 transform 每帧由这里写。所以位移照旧走直线，
+ * 姿态往上抬一截再落回来 —— 看着就是一蹦一蹦地跑过去。这也正是音乐包里 `bounce` 那条
+ * 「边跑边跳」的观感来源（那里脚下其实一步没挪，这里位移是真的）。
+ *
+ * 起落速率不匀：`|sin|` 落地即起，中间不粘地。走只是轻轻颠，不抢戏。
+ */
+const HOP_RUN = 26, HOP_WALK = 7;
+/** 弹跳高度（logo 单位）。`modeT` 不用：相位用连续帧时钟，抬起来的那一下不该因为切模式重来。 */
+const hopOf = (mode, t) => {
+  const hz = mode === 'run' ? 2.4 : mode === 'walk' ? 1.7 : 0;
+  if (!hz) return 0;
+  return (mode === 'run' ? HOP_RUN : HOP_WALK) * Math.abs(Math.sin(Math.PI * hz * t));
+};
+
+/**
+ * 「让开手牌」的两个落点，给宿主的 `pet_move_to` 用（`figure.json` 的 `moves` 是官方字段，
+ * `src/moves.ts` 校验参数、`web/figure-frame.js` 落到 `body.move` → 这里的函数 → `walkTo`）。
+ *
+ * 宿主交过来的 `bounds` 只有舞台尺寸和可站范围（`W` / `minX` / `maxX` / `S`），**没有她此刻在哪**，
+ * 所以这里只答「站到哪」，左还是右由调用方选 `to` 的名字定。
+ *
+ * 26% / 74% 是从宿主补丁里那组 `SKIP_X1/SKIP_X2` 继承的实测值：1920×1080 下炉石手牌区就压在这段里，
+ * 本人 2026-10-29 反馈「范围有点宽，快走到牌边缘再跳」之后收窄到的。再各让开半个身位
+ * （宿主的半宽是 `104 * S`），落点才不压在牌边上。
+ */
+const HAND_X1 = .26, HAND_X2 = .74;
+const offHand = (side) => (_params, bounds) => {
+  const half = 104 * bounds.S;
+  const x = side < 0 ? bounds.W * HAND_X1 - half - 8 : bounds.W * HAND_X2 + half + 8;
+  return { x: clamp(x, bounds.minX, bounds.maxX) };
+};
+/** 左 / 右让开手牌。导出只为测试能直接算落点（宿主只认 `figure.json` 的 `export` 字段）。 */
+export const MOVES = { 'off-hand-left': offHand(-1), 'off-hand-right': offHand(1) };
+
+/**
+ * 自己认出「站在手牌区里」，然后挪到带子外面去。
+ *
+ * ## 她凭什么知道自己在哪
+ *
+ * `draw(petG, fc, o)` 的 `o` 里没有 x —— 位置住在宿主的 `kit/body.js` 里。但**舞台那个 iframe 是铺满整屏的**
+ * （`pet.css`：`.figure-layer .figure-clip{position:absolute;inset:0}`，里面的 iframe `inset:0;width/height:100%`），
+ * 所以她在 iframe 里画的坐标就是舞台坐标。宿主每帧往 `petG` 写 `transform`，
+ * 照 `body.js` 里 `toStage()` 那条式子（`x = AX + (lx - ax) * kx`）反解，
+ * 就能还原「身体中心此刻站在画面的哪一列」。
+ *
+ * ## 挪是画出来的，不是走出来的
+ *
+ * 位移终究在宿主手里（`walkTo`），形象包改不了。能做的是**把自己画偏**：外层 `<g>` 加一段水平位移。
+ * 麻烦在于宿主还按原位算三样东西，而这三样恰好都是她上报的 ——
+ * `extent`（包围盒）、`hits`（点哪儿算点她）、`anchors`（气泡锚点）。三样加同一个量，视觉/点击/气泡就都跟上。
+ * 剩下唯一的漏网是脚下那圈阴影（宿主画的），它是 `petG` 的前一个兄弟，跟着平移即可。
+ *
+ * ## 代价，写在明处
+ *
+ * - 宿主眼里的位置没变：漫游目标、撞边、换装都按原位算。所以她可能是「看着贴屏幕边、逻辑还在中间」。
+ * - 气泡能跟，别的由宿主定位的东西（状态气泡、换装的取景框）不一定跟。
+ * - 这是对着「iframe 铺满舞台」这个实现细节做文章。作者若把 frame 改成局部窗口（`swap-motion` 提到过
+ *   `haloRect` 那种切窗），这套会失效 —— 失效的表现是「她不挪」，不会崩。
+ * - 判定只看**宿主给的位置**（不含自己的偏移），否则推出了带子、判定又说不算，会原地来回抖。
+ */
+const XF_RE = /translate\(\s*(-?[\d.]+)\s+(-?[\d.]+)\s*\)\s*rotate\(\s*(-?[\d.]+)\s*\)\s*scale\(\s*(-?[\d.]+)\s+(-?[\d.]+)\s*\)\s*translate\(\s*(-?[\d.]+)\s+(-?[\d.]+)\s*\)/;
+/** 包围盒的一半身宽（logo 单位，已按 BODY_SCALE 缩过）。 */
+const HALF_LOGO = (EXTENT[2] - EXTENT[0]) / 2 * K;
+
+/**
+ * 身体中心此刻站着的舞台 x；读不到宿主写的变换就返回 null。
+ *
+ * 宿主每帧写的是 `translate(AX AY) rotate(rot) scale(kx ky) translate(-ax -ay)`，
+ * 而 `toStage(lx, ly)` 是 `(lx - ax) * kx + AX` —— 所以反解时第三个平移要**加**回去（它本身已是负号）。
+ */
+export function stageCenterX(petG) {
+  const m = XF_RE.exec(petG?.getAttribute?.('transform') || '');
+  return m ? Number(m[1]) + (128 + Number(m[6])) * Number(m[4]) : null;
+}
+
+/**
+ * 该往哪挪（舞台像素，带符号）。站在牌带外 → 0；压在里面 → 挪到较近那一侧的外沿。
+ * 牌带窄得放不下她、或者挪出去会出可站范围 → 0（宁可不挪，也不把她甩到屏幕外）。
+ */
+export function avoidShift(centerX, W, halfW, minX, maxX) {
+  if (!(W > 0) || !Number.isFinite(centerX)) return 0;
+  const l = W * HAND_X1 - halfW, r = W * HAND_X2 + halfW;
+  if (!(l < r) || centerX <= l || centerX >= r) return 0;
+  const to = centerX - l < r - centerX ? l : r;
+  return to < minX || to > maxX ? 0 : to - centerX;
+}
+
+
 // the face texture covers this rect of the master drawing, one texel per master pixel
 const FACE = { x: 520, y: 578, w: 390, h: 252 };
 // the head's parallax warps act over this rect (rig units); the long hair below it stays put
@@ -421,7 +549,15 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
 
   /* ---------- mounting inside the pet's SVG group ---------- */
   const VIEW = model.view;
-  let fo = null, canvas = null, fxG = null, rig = null, mountedIn = null, pxScale = 0, frameN = 0;
+  let fo = null, canvas = null, fxG = null, spG = null, rig = null, mountedIn = null, pxScale = 0, frameN = 0;
+  /** 上一帧写进 `spG` 的纵向落点（见 draw 里的跑跳），同值不重复写。 */
+  let hopWas = null;
+  /** 自己让开手牌的量：舞台像素（给阴影）与 logo 单位（给 `<g>`、包围盒、命中圈、锚点）。 */
+  let avoidStage = 0, avoidLogo = 0;
+  /** 让开时抬起来的高度（logo 单位）：离目标越远抬得越高，落回 0 —— 看着是跃出去，不是平移过去。 */
+  let avoidLift = 0;
+  /** 宿主的阴影（`svg` 的第一个孩子，不在 petG 里），每帧按 BODY_SCALE 缩一次。 */
+  let shadowEl = null;
   function mount(petG) {
     petG.textContent = '';
     // the previous rig's GL context outlives its canvas until GC: release it or repeated
@@ -439,11 +575,69 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
       fo.appendChild(canvas);
     }
     fxG = document.createElementNS(SVGNS, 'g');
-    petG.append(fo, fxG);
+    // 画布和特效都在这一层里，整层绕脚底缩（见文件顶部的 BODY_SCALE）
+    spG = document.createElementNS(SVGNS, 'g');
+    spG.setAttribute('transform', SCALE_T);
+    hopWas = null;   // 新的一层，下一帧必须重写（见 draw 里的跑跳）
+    spG.append(fo, fxG);
+    petG.append(spG);
+    shadowEl = petG.parentElement?.querySelector('.shadow') ?? null;
     rig = createRig(canvas, { deformers: L.deformers, parts: L.parts, view: VIEW });
     for (const n in tex) rig.upload(n, tex[n]);
     if (fade) for (const n in fade.set.tex) rig.upload(n + '@mix', fade.set.tex[n]);
     mountedIn = petG; pxScale = 0;
+  }
+  /**
+   * 把人缩小之后补阴影。
+   *
+   * 阴影是宿主自己的 `<ellipse class="shadow">`（`svg` 的第一个孩子，不在 petG 里），
+   * 半径按 `S` 算，不会跟着我们的 `<g>` 一起缩 —— 人小了，地上还是一大摊。
+   * 它每帧只改 `cx/cy/rx/ry/opacity`，从不碰 `transform`，所以这里补一个"绕自己中心缩"的变换。
+   * 读到的 `cx/cy` 是上一帧的（宿主在 `custom.draw` 之后才写阴影），差一帧，看不出来。
+   */
+  function scaleShadow() {
+    if (!shadowEl?.isConnected) shadowEl = mountedIn?.parentElement?.querySelector('.shadow') ?? null;
+    if (!shadowEl) return;
+    const cx = Number(shadowEl.getAttribute('cx')), cy = Number(shadowEl.getAttribute('cy'));
+    if (!Number.isFinite(cx) || !Number.isFinite(cy)) return;
+    // 让开手牌时阴影跟着一起平（`avoidStage`），否则人会站在自己的影子外面
+    shadowEl.setAttribute('transform', `translate(${f1(cx * (1 - K) + avoidStage)} ${f1(cy * (1 - K))}) scale(${K})`);
+  }
+
+  /**
+   * 现在是不是有一层窗口盖着画面底部中央 —— 也就是「她在挡别人的东西」。
+   *
+   * 形象包拿不到窗口的名字（`windows` 只有 id 和矩形），只能按「够宽 + 够到屏幕底 + 盖住中间」估。
+   * 拿不到窗口信息（清单没声明 `needs`、或这个平台不给）就当作没有：**桌面上不该躲**，
+   * 她要是连屏幕中间都不肯站，那比挡牌更像 bug。
+   */
+  function handAt(b) {
+    const list = b?.windows;
+    if (!Array.isArray(list) || !list.length) return false;
+    return list.some((w) => w.x1 - w.x0 >= b.W * .55 && w.x0 <= b.W * .35 && w.x1 >= b.W * .65 && w.y1 >= b.H * .9);
+  }
+
+  /**
+   * 推进「让开手牌」这一段位移。返回目前该用的 logo 单位偏移。
+   *
+   * 目标只看宿主给的位置（`stageCenterX`）：人在带子里就推到最近的带外，出了带子就回 0。
+   * 一帧走不完，用指数收敛（约 0.11s 常数）—— 直接跳过去会像瞬移，炉石那边看得一清二楚。
+   */
+  function avoidStep(petG, dt) {
+    const b = opts.host?.bounds?.();
+    const S = b?.S > 0 ? b.S : .42;
+    let target = 0;
+    if (b?.W > 0 && handAt(b)) {
+      const cx = stageCenterX(petG);
+      const minX = 104 * S + 8, maxX = b.W - 104 * S - 8;
+      target = avoidShift(cx, b.W, HALF_LOGO * S, minX, maxX);
+    }
+    avoidStage += (target - avoidStage) * (1 - Math.exp(-clamp(dt, 0, .05) * 9));
+    if (Math.abs(avoidStage - target) < .5) avoidStage = target;
+    avoidLogo = avoidStage / S;
+    // 还差多少没走完，就抬多高（上限约 19 个舞台像素）：跃出去的那一下，落回地面时正好到位
+    avoidLift = Math.min(Math.abs(target - avoidStage) / S * .35, 46);
+    return avoidLogo;
   }
   // a fade in progress: the rig crossfades every part from `tex` to fade.set's textures over fade.dur seconds
   let fade = null;
@@ -632,9 +826,25 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
   function draw(petG, fc, o) {
     if (mountedIn !== petG || !petG.contains(fo)) mount(petG);
     if (frameN++ % 20 === 0) fitCanvas();
+    scaleShadow();
     const t = o.t, dt = lastT == null ? 1 / 60 : clamp(t - lastT, 0, .05);
     lastT = t;
     const mode = o.mode || 'idle', face = o.face || 'neutral';
+    /*
+     * 跑跳。位移仍然是宿主那条直线（`walkTo`），这里只把外层 `<g>` 往上抬 —— 见文件顶部的 HOP_RUN。
+     * 抬起来的那一截也压在 `scale(K)` 前面算，所以缩放换了高度也跟着换。
+     * `hopWas` 挡掉重复写：`f1` 已经把值收到一位小数，同值就不必再碰 attribute。
+     */
+    if (spG) {
+      const hop = hopOf(mode, t) + avoidLift;
+      const tx = f1(128 - 128 * K + avoidStep(petG, dt));
+      const ty = f1(256 - 256 * K - hop);
+      const sig = `${tx} ${ty}`;
+      if (sig !== hopWas) {
+        spG.setAttribute('transform', `translate(${tx} ${ty}) scale(${K})`);
+        hopWas = sig;
+      }
+    }
     /*
      * 这个形象包自己声明的动作，走的是**另一条通道**。
      *
@@ -1047,12 +1257,28 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
      */
     dispose() {
       rig?.dispose();
-      rig = null; canvas = null; fo = null; fxG = null; mountedIn = null;
+      // 阴影是宿主的，人走了别把避让时加的位移留在上面
+      if (shadowEl?.isConnected) shadowEl.removeAttribute('transform');
+      rig = null; canvas = null; fo = null; fxG = null; spG = null; mountedIn = null; shadowEl = null; hopWas = null; avoidStage = 0; avoidLogo = 0; avoidLift = 0;
     },
+    /*
+     * 包围盒与命中圈跟着 BODY_SCALE 缩。
+     *
+     * 宿主每帧读这两个（`kit/body.js` 的 `layout()` 与 `hits()`），不带它们的话
+     * 默认值还是原尺寸的 `EXTENT = [20,12,236,256]` / `HITS = [[128,128,108]]` ——
+     * 她画小了，点她周围的空气仍然算点她，炉石那边就是一圈看不见的死区。
+     */
+    get extent() {
+      const [x0, y0, x1, y1] = scalePoint(EXTENT);
+      return [x0 + avoidLogo, y0, x1 + avoidLogo, y1];
+    },
+    get hits() { const o = avoidLogo; return HITS.map(p => { const [x, y, r] = scalePoint(p); return [x + o, y, r]; }); },
     reset() {
       endFade();
       for (const k in sp) { sp[k].x = 0; sp[k].v = 0; }
       lastT = null; rootWas = {}; prevTilt = 0; prevYaw = 0; prevLow = 0; headTilt = 0; wTilt = 0; wLean = 0; finMood = 0; tailMood = 0; wagAmp = 0; sitK = 0; walkK = 0; runK = 0; swingK = 0;
+      hopWas = null; avoidStage = 0; avoidLogo = 0; avoidLift = 0;
+      if (shadowEl?.isConnected) shadowEl.removeAttribute('transform');
       prevLook = null; prevShut = 0; Object.assign(hl, { dx: 0, dy: 0, scale: 1, quiver: 0, alpha: 1 });
     },
     /** Loads every scheme's and outfit's textures, so later switches are immediate. */
@@ -1063,9 +1289,18 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
     get colors() { return { z: accent() }; },
     schemes: SCHEMES,
     // points the kit uses: eye tracking, a tear and one under each eye (where the streams run), sleep z's, hearts [x from, x to, y], bubble
-    anchors: {
-      gaze: [U(745), V(690)], tear: [U(640), V(752)], tears: [[U(654), V(752)], [U(852), V(750)]], z: [196, 44],
-      hearts: [96, 176, 62], bubble: [128, 18],
+    /*
+     * 锚点也得跟着缩：气泡、眼泪、睡眠 z、爱心都是按 logo 坐标摆的，
+     * 人缩小了锚点不缩，气泡会飘在她头顶上方一大截（看着像在跟别人说话）。
+     */
+    get anchors() {
+      const o = avoidLogo;
+      const pt = ([x, y]) => [sc(x, 128) + o, sc(y, 256)];
+      return {
+        gaze: pt([U(745), V(690)]), tear: pt([U(640), V(752)]), tears: [pt([U(654), V(752)]), pt([U(852), V(750)])],
+        z: pt([196, 44]),
+        hearts: [sc(96, 128) + o, sc(176, 128) + o, sc(62, 256)], bubble: pt([128, 18]),
+      };
     },
     model,
   };
@@ -1100,5 +1335,11 @@ export async function createWhaleBody(base, opts) {
     if (v.expression) w.expression = v.expression;
     if (w.motion || w.expression) words[v.id] = w;
   }
-  return opts.kit.createBody(opts.host, { figure: await createWhaleFigure(base, opts), words });
+  /*
+   * `moves` 同理，也是宿主只从 `opts` 认的东西：`figure.json` 里那份声明是给 **bot** 看的
+   * （`pet_move_to` 拿它校验参数），真正算出「站到哪」的函数得在这里递给 `createPet`。
+   * 两边同 id，缺一边就是一个调不通的目标：只有声明没有实现，`body.move` 返回 false，
+   * 事件里报 `interrupted`（by: 'busy'），看着像她不肯走。
+   */
+  return opts.kit.createBody(opts.host, { figure: await createWhaleFigure(base, opts), words, moves: MOVES });
 }
