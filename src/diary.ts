@@ -43,6 +43,9 @@ const RESULT_ZH: Record<string, string> = {
   conceded: '对面跑了',
 };
 
+/** 复盘日记文件名规则（如 `炉石日记-2026-11-19.md`），供存储统计与清理复用。 */
+export const DIARY_FILE_RE = /^炉石日记-\d{4}-\d{2}-\d{2}\.md$/;
+
 /** 一天的日记放一个文件。换盘直接换目录，文件名只带日期，不带路径信息。 */
 export function diaryFile(dir: string, at: string): string {
   const day = (at || '').slice(0, 10) || new Date().toISOString().slice(0, 10);

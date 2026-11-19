@@ -30,7 +30,7 @@ const ZH: HearthstoneText = {
     normal: '该开口时自己开口',
   },
   promptTitle: '炉石陪打',
-  promptDescription: '她怎么看你的对局、什么时候开口、哪些事只说事实不做判断。',
+  promptDescription: '怎么看对局、什么时候开口、哪些事只说事实不做判断。',
   varStatus: '日志连接状态一句话',
   varGame: '当前这局的局面摘要;不在局中时是一句说明',
   varMode: '现在是自己开口还是只看不说',
@@ -49,13 +49,13 @@ const EN: HearthstoneText = {
     normal: 'Speaks up on its own',
   },
   promptTitle: 'Hearthstone companion',
-  promptDescription: 'How she reads your match, when she speaks up, and what she states as fact rather than judgement.',
+  promptDescription: 'How to read matches, when to speak up, and what to state as fact rather than judgement.',
   varStatus: 'One line on the log connection',
   varGame: 'The current match summary; a note when no match is running',
-  varMode: 'Whether she speaks up by herself or only watches',
+  varMode: 'Whether to speak up autonomously or only watch',
   notInGame: 'No match is running right now.',
-  modeQuiet: 'Quiet: she watches and records but does not speak up.',
-  modeNormal: 'Commentary: she speaks up when something happens.',
+  modeQuiet: 'Quiet: watch and record only, speak when asked.',
+  modeNormal: 'Commentary: speak up when something happens.',
 };
 
 export function hearthstoneText(language?: string): HearthstoneText {

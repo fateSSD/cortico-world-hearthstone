@@ -9,12 +9,13 @@
  * 其中 .alert 承担「陪打」的主要部分:残血、被铺场、进入斩杀线这些时刻她自己会开口,
  * 不必等被问。
  */
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { closeSync, existsSync, fsyncSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Language } from 'cortico/core/language.ts';
 import type {
-  Logger, ToolDef, ToolTag, World, WorldHost, WorldWebUiDecl, WorldLamp, TriggerMode,
+  EventEnvelope, EventTag, Logger, StoragePart, ToolDef, ToolTag, World, WorldHost, WorldWebUiDecl, WorldLamp, TriggerMode,
 } from 'cortico/core/types.ts';
 import { HEARTHSTONE_ID, hearthstoneConfigGroups, type HearthstoneConfigSection } from './config.ts';
 import { ensureFigurePack, inspectFigurePack, type FigurePackResult } from './figure-pack.ts';
@@ -28,9 +29,9 @@ import {
 } from './log-config.ts';
 import { isPeerRunning } from './peer.ts';
 import { logSetupHint, peerProcessNames } from './platform.ts';
-import { appendDiary, appendDiaryNote, appendThought, readThoughts } from './diary.ts';
+import { appendDiary, appendDiaryNote, appendThought, DIARY_FILE_RE, readThoughts } from './diary.ts';
 import { advise, briefAdvice, buildModelPrompt, renderAdvice } from './advice.ts';
-import { askModel, pickKey, type LlmConfig } from './llm.ts';
+import { askModelWithUsage, pickKey, type LlmConfig, type LlmRequest, type LlmResult } from './llm.ts';
 import { advicePick, composeTurnEvent, playedCardName, sameCardName, settleTurnWatermark, shouldAnnounceTurn } from './turn-event.ts';
 import { isMulliganOpen, mulliganPlan, mulliganText } from './mulligan.ts';
 import { ARENA_GUIDE, deckBrief, deckListForModel, deckStats, resolveArenaCard, renderDraft } from './arena.ts';
@@ -101,6 +102,47 @@ const FEEDBACK_LINK = {
   label: `反馈:${FEEDBACK_EMAIL}`,
   href: 'https://mail.qq.com/',
 };
+
+/** 同目录临时文件 + flush + rename：失败时旧文件仍是完整 JSON，临时文件必清理。 */
+function writeAtomicSync(path: string, text: string): void {
+  const tmp = `${path}.tmp-${process.pid}`;
+  let fd: number | null = null;
+  try {
+    fd = openSync(tmp, 'w');
+    writeFileSync(fd, text, 'utf8');
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    renameSync(tmp, path);
+  } finally {
+    if (fd !== null) {
+      try { closeSync(fd); } catch { /* 保留原始写入异常 */ }
+    }
+    try { unlinkSync(tmp); } catch { /* 已 rename 或临时文件未建成 */ }
+  }
+}
+
+/** 多文件清除任一步失败都恢复已处理文件；恢复也失败时显式报告部分清理。 */
+function unlinkManyWithRollback(paths: readonly string[]): void {
+  const snapshots = paths.filter((path) => existsSync(path)).map((path) => ({ path, data: readFileSync(path) }));
+  const processed: typeof snapshots = [];
+  try {
+    for (const snapshot of snapshots) {
+      processed.push(snapshot);
+      unlinkSync(snapshot.path);
+    }
+  } catch (error) {
+    const rollbackFailures: string[] = [];
+    for (const snapshot of processed) {
+      try { writeAtomicSync(snapshot.path, snapshot.data.toString('utf8')); }
+      catch { rollbackFailures.push(snapshot.path); }
+    }
+    if (rollbackFailures.length) {
+      throw new Error(`文件删除失败，且以下文件未能恢复，存在部分清理：${rollbackFailures.join('、')}`, { cause: error });
+    }
+    throw new Error('文件删除失败，已恢复本次删除的全部文件。', { cause: error });
+  }
+}
 
 /**
  * 一局的指纹:结果、回合数、双方终局血量、职业。
@@ -208,6 +250,13 @@ export interface GameLogEntry {
 /** 对局档案留多少局。50 局够看出趋势，又不至于让文件大到读不动。 */
 const GAMES_KEEP = 50;
 
+/**
+ * 隐藏 World 的 deferred 会被宿主直接丢弃（`pushDeferred` 无回调）。从未 render 的占位
+ * 因此需要一个有界租约：超时后允许同回合重新排队。只对 `queuedTurnRenderedAt === 0`
+ * 生效 —— 一旦 render，persona.onDelivery 没有期限，绝不能按时间判死。
+ */
+const TURN_QUEUE_LEASE_MS = 30_000;
+
 export interface HearthstoneWorldOptions {
   cfg: HearthstoneConfigSection;
   timezone: string;
@@ -216,6 +265,7 @@ export interface HearthstoneWorldOptions {
   /** 读部署 .env 里的密钥。模型 key 从这里来,不进 config.json。 */
   secret(name: string): string;
   persist(patch: Partial<HearthstoneConfigSection>): void;
+  now?: () => number;
 }
 
 type Phase = 'no-log' | 'watching' | 'in-game' | 'ended';
@@ -225,6 +275,14 @@ interface WatchStatus {
   phase: Phase;
   path: string | null;
   note: string;
+}
+
+interface TurnAttempt {
+  senderKey: string;
+  turn: number;
+  pick: string;
+  startedAt: string;
+  cursor?: number;
 }
 
 /**
@@ -393,7 +451,7 @@ const STYLE_DECL: Decl = {
     },
   },
   tags: ['read', 'write'],
-  summary: { zh: '读/写她自己的打法立场：我怎么说话、我倾向推哪条路（第一人称，不是攻略）。', en: 'Reads and writes her own play style: how she talks and which line she leans toward.' },
+  summary: { zh: '读/写你的打法立场：怎么说话、倾向推哪条路（第一人称，不是攻略）。', en: 'Reads and writes your own play style: how you talk and which line you lean toward.' },
 };
 
 const HIS_STYLE_DECL: Decl = {
@@ -462,7 +520,7 @@ const DIARY_DECL: Decl = {
     + 'cannot: why the game turned, which single turn was the hinge, what you would look at differently next time. '
     + 'One entry per match. Write it after a loss or after a clear misjudgement; skip it when nothing stands out — '
     + 'a diary full of "打完了" is worse than an empty one. '
-    + 'First person, under 120 characters, no bullet points. This is also what the panel\'s 「她最近想到的」 shows.',
+    + 'First person, under 120 characters, no bullet points. This also appears in the diary notes panel.',
   parameters: {
     type: 'object',
     additionalProperties: false,
@@ -481,7 +539,7 @@ const DIARY_DECL: Decl = {
   tags: ['write'],
   summary: {
     zh: '每局打完记一段复盘（第一人称）：为什么赢/输、哪一手是关键。面板的感想栏读的就是这里。',
-    en: 'Writes her own post-match review; the panel reads it back.',
+    en: 'Writes your own post-match review; the panel reads it back.',
   },
 };
 
@@ -531,6 +589,32 @@ export class HearthstoneWorld implements World {
   private lastRecordedTurn = -1;
   /** 已经报过「轮到我」的最大回合号,避免同回合重复开口。 */
   private lastAnnouncedTurn = -1;
+  /** 已排入队列等待投递的回合号（防止同一回合在未投递前被连续日志块重复排队）。 */
+  private queuedTurn = -1;
+  /** 已调 render() 但尚未收到 settled 的时间戳（ms），用于识别宿主静默取消后的残留占位。 */
+  private queuedTurnRenderedAt = 0;
+  /** 入队时刻（ms）。只用于「从未 render」的隐藏占位有界恢复；render 后不按时间判死。 */
+  private queuedTurnQueuedAt = 0;
+  /** 同回合允许重排，因此只用 senderKey 不够；每次排队都有单调递增的 attempt。 */
+  private turnAttemptSeq = 0;
+  private queuedTurnAttempt = 0;
+  /**
+   * 本实例身份。宿主只按 `source === world.id` 广播 onEventsSettled，stop/重载后新旧实例
+   * 同 id、同 senderKey、attempt 又从 1 开始；没有这一层隔离，旧实例的迟到回执会结算新实例。
+   * 与 attempt 组成不可复用的复合身份。
+   */
+  private readonly turnInstanceId = randomUUID();
+  /** attempt -> 本次 render 的实际建议；settled 还需匹配 meta.attempt 与宿主 cursor。 */
+  private pendingTurns = new Map<number, TurnAttempt>();
+  /** 已回收但已 render/append 的 attempt；迟到 delivered 仍须结算自己的账，绝不能误删或串到 B。 */
+  private retiredTurnAttempts = new Map<number, TurnAttempt>();
+  /** 竞技场代次号：每次清空竞技场/重置选牌/停止时递增，防止在途 LLM 推演写回旧数据。 */
+  private arenaGeneration = 0;
+  /** stop 切代后，迟到的第二意见只结算用量，不再拼进工具回执。 */
+  private lifecycleGeneration = 0;
+  /** 当前实例发出的模型请求；stop 先取消，再等这些请求完成用量结算。 */
+  private readonly llmInflight = new Set<Promise<LlmResult | null>>();
+  private readonly llmControllers = new Set<AbortController>();
   /**
    * 心跳用：最近一次「日志里读到新的回合号」的时刻，和那次的回合号。
    *
@@ -714,7 +798,16 @@ export class HearthstoneWorld implements World {
     host.log.info(`炉石陪打已启动:开始监视对局日志。(${BUILD_TAG})`);
   }
 
+  private nowMs(): number {
+    return this.opts.now?.() ?? Date.now();
+  }
+
   async stop(): Promise<void> {
+    // 第一动先切代：即使宿主忽略 AbortSignal 并迟到返回，plan 也只能记账，不能写盘。
+    this.arenaGeneration += 1;
+    this.lifecycleGeneration += 1;
+    for (const controller of this.llmControllers) controller.abort();
+    const inflight = [...this.llmInflight];
     if (this.peerTimer) {
       clearInterval(this.peerTimer);
       this.peerTimer = null;
@@ -723,8 +816,56 @@ export class HearthstoneWorld implements World {
     this.tail = null;
     this.clearPendingEndTimer();
     await this.chain.catch(() => undefined);
+    // reportUsage 在跟踪 Promise 内完成；host/log 必须等它结算后才能卸载。
+    await Promise.allSettled(inflight);
+    this.queuedTurn = -1;
+    this.queuedTurnRenderedAt = 0;
+    this.queuedTurnQueuedAt = 0;
+    this.queuedTurnAttempt = 0;
+    this.pendingTurns.clear();
+    this.retiredTurnAttempts.clear();
     this.host = null;
     this.log = null;
+  }
+
+  /**
+   * 交接结束钩子：同步搭车入队一条当前对局快照事件（piggyback + snapshot），
+   * 在投递当下的 render() 中实时读取最新回合与双方血量/护甲。
+   */
+  onHandoffEnded(): void {
+    if (this.queuedTurnRenderedAt > 0 && this.queuedTurnAttempt > 0) {
+      // 只释放防重占位；已 render 的 A 可能早已 append，迟到 settled 仍要能找到自己的 tombstone。
+      this.clearTurnAttempt(this.queuedTurnAttempt, true);
+    }
+    const host = this.host;
+    if (!host || this.cfg.mode === 'quiet' || !this.cfg.speakTurns || this.musicRunning) return;
+    const snap = this.lastSnapshot ?? this.parser.snapshot();
+    if (!snap || snap.ended) return;
+    const expectedStart = snap.startedAt;
+    const senderKey = `hearthstone.handoff:${expectedStart}`;
+    const renderHandoff = (): string | null => {
+      if (this.cfg.mode === 'quiet' || !this.cfg.speakTurns || this.musicRunning) return null;
+      const cur = this.lastSnapshot ?? this.parser.snapshot();
+      if (!cur || cur.ended || cur.startedAt !== expectedStart) return null;
+      const side = cur.isMyTurn ? '我方回合' : '对手回合';
+      const myArmor = cur.me.armor ? ` + ${cur.me.armor} 护甲` : '';
+      const foeArmor = cur.opponent.armor ? ` + ${cur.opponent.armor} 护甲` : '';
+      return `[handoff] 对局快照 · 第 ${cur.turn} 回合(${side}) · 我 ${cur.me.health} 血${myArmor} ${cur.me.mana}/${cur.me.manaMax}费 | 对手 ${cur.opponent.health} 血${foeArmor}。需要建议请调 hearthstone_state 或 hearthstone_advice。`;
+    };
+    if (typeof host.pushDeferred === 'function' && host.pushDeferred.length > 0) {
+      host.pushDeferred({
+        type: 'hearthstone.handoff',
+        senderKey,
+        tags: ['snapshot'],
+        render: renderHandoff,
+      }, { trigger: 'piggyback' });
+    } else {
+      const out = renderHandoff();
+      if (out) {
+        void this.push('hearthstone.handoff', senderKey, out, 'piggyback', { tags: ['snapshot'] })
+          .catch((error: unknown) => this.log?.warn(`交接快照推送失败:${(error as Error).message}`));
+      }
+    }
   }
 
   /**
@@ -884,7 +1025,16 @@ export class HearthstoneWorld implements World {
     // 为什么必须清:`lastAnnouncedTurn` 是严格递增的水位,新局从第 1 回合开始,`1 > 16` 是假命题 ——
     // **整局一句提醒都不会有**,要等到回合数超过上一局才恢复。用户看到的就是「打着打着她就不说话了」。
     // 实测:一局打到第 16 回合结束,下一局从 1 到 16 全程哑火。
-    this.lastAnnouncedTurn = settleTurnWatermark(this.lastAnnouncedTurn, snapshot.turn);
+    const settledWatermark = settleTurnWatermark(this.lastAnnouncedTurn, snapshot.turn);
+    if (settledWatermark !== this.lastAnnouncedTurn) {
+      this.pendingTurns.clear();
+      this.retiredTurnAttempts.clear();
+      this.queuedTurn = -1;
+      this.queuedTurnRenderedAt = 0;
+      this.queuedTurnQueuedAt = 0;
+      this.queuedTurnAttempt = 0;
+    }
+    this.lastAnnouncedTurn = settledWatermark;
     if (snapshot.turn < this.lastRecordedTurn) {
       this.lastRecordedTurn = -1;
       this.timeline = [];
@@ -920,6 +1070,12 @@ export class HearthstoneWorld implements World {
       this.lastRecordedTurn = -1;
       // 这一条曾经漏了,代价很大:新局的前 N 个回合全部静默(见上面「回合号掉回去」那段)
       this.lastAnnouncedTurn = -1;
+      this.queuedTurn = -1;
+      this.queuedTurnRenderedAt = 0;
+      this.queuedTurnQueuedAt = 0;
+      this.queuedTurnAttempt = 0;
+      this.pendingTurns.clear();
+      this.retiredTurnAttempts.clear();
       this.archivedThisGame = false;
       this.lastSurpriseTurn = -1;
       this.pushedMulligan = false;
@@ -962,7 +1118,12 @@ export class HearthstoneWorld implements World {
     // 因为批末早不是那些回合的局面了：批尾落在对方回合或已结束时，中间所有回合一起被吞。
     // 而 tail 一旦卡顿（文件被占用、休眠唤醒、大日志读得慢），积压就是几万行一起涌进来。
     // 按队列补报与批大小无关，才是稳的。
-    if (!quiet && this.cfg.speakTurns && shouldAnnounceTurn(snapshot, this.lastAnnouncedTurn)) {
+    // 隐藏 World 的 pushDeferred 被宿主静默丢弃，从未 render 的占位不会自己释放。
+    // 只回收「尚未 render」的租约，render 后的 onDelivery 无期限，时间再长也不判死重排。
+    this.releaseExpiredUnrenderedTurn();
+    // render 后事件已 append，persona.onDelivery 又没有完成期限：时间再长也不能据此判死重排。
+    const effectiveWatermark = Math.max(this.lastAnnouncedTurn, this.queuedTurn);
+    if (!quiet && this.cfg.speakTurns && shouldAnnounceTurn(snapshot, effectiveWatermark)) {
       const point: TurnPoint = {
         turn: snapshot.turn,
         myHp: snapshot.me.health, myArmor: snapshot.me.armor, myHand: snapshot.me.handCount, myBoard: boardLine(snapshot.me),
@@ -974,21 +1135,86 @@ export class HearthstoneWorld implements World {
         this.lastAdvicePick = '';
         this.advicePickStreak = 0;
         this.turnAdvice.clear();
+        this.pendingTurns.clear();
+        this.retiredTurnAttempts.clear();
+        this.queuedTurn = -1;
+        this.queuedTurnRenderedAt = 0;
+        this.queuedTurnQueuedAt = 0;
+        this.queuedTurnAttempt = 0;
       }
-      // 连着推了两次、他还没打的那张，这一回合换一张。
-      //
-      // `advicePickStreak` 是「上一次」生成时的计数（`withRepeatNote` 在生成之后才更新），
-      // 所以读到 2 表示「已经连推两回合」，正好是第三回合该换的时候。
-      // 阈值取 2 不是 3：第二遍还能换个角度说，第三遍再说同一句就是唠叨了。
       const avoid = this.advicePickStreak >= 2 && this.lastAdvicePick ? [this.lastAdvicePick] : [];
+      const avoidCopy = [...avoid];
       const composed = composeTurnEvent(point, snapshot, this.cfg.adviceInTurn !== false, this.cfg.keepCards, avoid);
       if (!composed.defer) {
-        this.lastAnnouncedTurn = snapshot.turn;
-        // 记下这回合推的是哪张，对局结束时和实际动作对齐写进归档。
-        this.turnAdvice.set(snapshot.turn, advicePick(composed.text));
-        const text = this.withRepeatNote(composed.text);
+        const expectedStart = snapshot.startedAt;
+        const pushedTurn = snapshot.turn;
+        const turnSenderKey = `hearthstone.turn:${pushedTurn}`;
+        // 排入等待队列阶段只锁定防重占位，绝不预先提交 lastAnnouncedTurn / turnAdvice / 连推计数
+        const attempt = ++this.turnAttemptSeq;
+        this.queuedTurn = pushedTurn;
+        this.queuedTurnRenderedAt = 0;
+        this.queuedTurnQueuedAt = this.nowMs();
+        this.queuedTurnAttempt = attempt;
         this.log?.info(`回合提醒:第 ${snapshot.turn} 回合(水晶 ${snapshot.me.mana}/${snapshot.me.manaMax})`);
-        this.enqueue(() => this.push('hearthstone.turn', `hearthstone.turn:${snapshot.turn}`, text, 'debounce'));
+        this.enqueue(async () => {
+          const clearTurnSlot = (): void => this.clearTurnAttempt(attempt);
+          const renderTurn = (): string | null => {
+            // 旧 attempt 即使晚到 render，也只能取消自己，绝不可清掉同回合的新 attempt。
+            if (this.queuedTurnAttempt !== attempt) return null;
+            try {
+              // 回收后的 A 若已真实 delivered，尚未 append 的 B 必须让路，避免同回合两条提醒。
+              if (this.lastAnnouncedTurn >= pushedTurn) {
+                clearTurnSlot();
+                return null;
+              }
+              if (this.cfg.mode === 'quiet' || !this.cfg.speakTurns || this.musicRunning) {
+                clearTurnSlot();
+                return null;
+              }
+              const cur = this.lastSnapshot ?? this.parser.snapshot();
+              if (!cur || cur.ended || cur.startedAt !== expectedStart || cur.turn !== pushedTurn || !cur.isMyTurn) {
+                clearTurnSlot();
+                return null;
+              }
+              const curPoint: TurnPoint = {
+                turn: cur.turn,
+                myHp: cur.me.health, myArmor: cur.me.armor, myHand: cur.me.handCount, myBoard: boardLine(cur.me),
+                foeHp: cur.opponent.health, foeArmor: cur.opponent.armor, foeHand: cur.opponent.handCount, foeBoard: boardLine(cur.opponent),
+              };
+              const recomposed = composeTurnEvent(curPoint, cur, this.cfg.adviceInTurn !== false, this.cfg.keepCards, avoidCopy);
+              if (recomposed.defer) {
+                clearTurnSlot();
+                return null;
+              }
+              const preview = this.previewRepeatNote(recomposed.text);
+              this.pendingTurns.set(attempt, {
+                senderKey: turnSenderKey, turn: pushedTurn, pick: preview.pick, startedAt: expectedStart,
+              });
+              this.queuedTurnRenderedAt = this.nowMs();
+              return preview.text;
+            } catch (error) {
+              clearTurnSlot();
+              this.log?.warn(`渲染炉石回合提醒失败:${(error as Error).message}`);
+              return null;
+            }
+          };
+          try {
+            const res = await this.push('hearthstone.turn', turnSenderKey, composed.text, 'debounce', {
+              tags: ['snapshot'],
+              meta: { hearthstoneTurnAttempt: attempt, hearthstoneTurnInstance: this.turnInstanceId },
+              deferredRender: renderTurn,
+            });
+            // 旧宿主在 pushEvent resolve 后拿到真实 cursor；现代宿主只认 onEventsSettled(delivered)。
+            if (res.status === 'delivered' && res.cursor !== undefined) {
+              this.settleTurnAttempt(attempt, res.cursor, 'delivered');
+            } else if (res.status !== 'deferred') {
+              clearTurnSlot();
+            }
+          } catch (error) {
+            clearTurnSlot();
+            this.log?.warn(`推送炉石回合提醒失败:${(error as Error).message}`);
+          }
+        });
       }
     }
     // 事件不再从队列取,但队列要清空,免得长期运行堆对象
@@ -1106,8 +1332,9 @@ export class HearthstoneWorld implements World {
       actions: this.parser.recent(this.cfg.historySize),
     };
     try {
-      writeFileSync(this.archivePath, JSON.stringify(data, null, 2), 'utf8');
+      writeAtomicSync(this.archivePath, JSON.stringify(data, null, 2));
     } catch (error) {
+      this.archivedThisGame = false;
       this.log?.warn(`上一局没能存下来:${(error as Error).message}`);
     }
   }
@@ -1204,7 +1431,7 @@ export class HearthstoneWorld implements World {
     if (lines.length > GAMES_KEEP) lines = lines.slice(-GAMES_KEEP);
 
     try {
-      writeFileSync(this.gamesPath, `${lines.join('\n')}\n`, 'utf8');
+      writeAtomicSync(this.gamesPath, `${lines.join('\n')}\n`);
     } catch (error) {
       // 存不下不能影响陪打 —— 这是复盘用的旁路，不是主路径。
       this.log?.warn(`对局档案没能追加:${(error as Error).message}`);
@@ -1312,7 +1539,7 @@ export class HearthstoneWorld implements World {
     if (!noted.ok) this.log?.warn(`感想存了，但没挂进日记：${noted.error}`);
 
     const count = readThoughts(dir, 500).length;
-    return `记下了（第 ${count} 条）。${where ? `局面：${where}。` : ''}面板「她最近想到的」和当天的日记里都能看到。`;
+    return `记下了（第 ${count} 条）。${where ? `局面：${where}。` : ''}面板感想栏和当天的日记里都能看到。`;
   }
 
   /**
@@ -1397,23 +1624,103 @@ export class HearthstoneWorld implements World {
    *
    * 第 3 遍起才提示：前两遍本来就该说，第三遍开始才是唠叨。
    */
-  private withRepeatNote(text: string): string {
+  private previewRepeatNote(text: string): { text: string; pick: string } {
     const pick = advicePick(text);
     // 这回合没有「按费打/先换」类建议（危险、空过、换牌），不算重复。
     // **但不清零** —— 中间插一个危险回合、之后又回到同一张牌，那仍然是连着劝。
-    if (!pick) return text;
+    if (!pick) return { text, pick: '' };
 
+    const nextStreak = pick === this.lastAdvicePick ? this.advicePickStreak + 1 : 1;
+    if (nextStreak < 3) return { text, pick };
+
+    return {
+      pick,
+      text: `${text}\n（**「${pick}」你已经连着推了 ${nextStreak} 个回合，他没打。** `
+        + '第二遍还能换个角度说，这一遍再念同一句就是唠叨了 —— '
+        + '要么给他一个跟之前不同的理由，要么只说这回合的场面，把选择留给他。他真没听见会问你。）',
+    };
+  }
+
+  private commitAdvicePick(pick: string): void {
+    if (!pick) return;
     if (pick === this.lastAdvicePick) {
       this.advicePickStreak += 1;
     } else {
       this.lastAdvicePick = pick;
       this.advicePickStreak = 1;
     }
-    if (this.advicePickStreak < 3) return text;
+  }
 
-    return `${text}\n（**「${pick}」你已经连着推了 ${this.advicePickStreak} 个回合，他没打。** `
-      + '第二遍还能换个角度说，这一遍再念同一句就是唠叨了 —— '
-      + '要么给他一个跟之前不同的理由，要么只说这回合的场面，把选择留给他。他真没听见会问你。）';
+  /**
+   * 只释放「入队后从未 render」的回合占位。宿主对隐藏 World 的 pushDeferred 直接丢弃，
+   * 不回调、不排队；租约到期后清掉占位，同回合的下一个日志块才能重新入队。
+   * render 过的 A 不能走这里：onDelivery 可能永久等待，按时间回收会造成同回合重复提醒。
+   */
+  private releaseExpiredUnrenderedTurn(): void {
+    if (this.queuedTurn < 0 || this.queuedTurnAttempt <= 0) return;
+    if (this.queuedTurnRenderedAt > 0 || this.queuedTurnQueuedAt <= 0) return;
+    if (this.nowMs() - this.queuedTurnQueuedAt < TURN_QUEUE_LEASE_MS) return;
+    const attempt = this.queuedTurnAttempt;
+    this.log?.info(`回合提醒未渲染超过租约,释放占位:第 ${this.queuedTurn} 回合`);
+    this.clearTurnAttempt(attempt);
+  }
+
+  private clearTurnAttempt(attempt: number, retireRendered = false): void {
+    const pending = this.pendingTurns.get(attempt);
+    if (retireRendered && pending) this.retiredTurnAttempts.set(attempt, pending);
+    this.pendingTurns.delete(attempt);
+    if (this.queuedTurnAttempt !== attempt) return;
+    this.queuedTurn = -1;
+    this.queuedTurnRenderedAt = 0;
+    this.queuedTurnQueuedAt = 0;
+    this.queuedTurnAttempt = 0;
+  }
+
+  private settleTurnAttempt(attempt: number, cursor: number, outcome: 'delivered' | 'discarded'): void {
+    if (!Number.isSafeInteger(cursor) || cursor < 0) return;
+    const pending = this.pendingTurns.get(attempt) ?? this.retiredTurnAttempts.get(attempt);
+    if (!pending || (pending.cursor !== undefined && pending.cursor !== cursor)) return;
+    pending.cursor = cursor;
+    this.pendingTurns.delete(attempt);
+    this.retiredTurnAttempts.delete(attempt);
+    if (outcome === 'delivered') {
+      const current = this.lastSnapshot ?? this.parser.snapshot();
+      // 上一局的迟到回调不能把旧回合记进新局。
+      if (current?.startedAt === pending.startedAt) {
+        const alreadyCommitted = this.lastAnnouncedTurn >= pending.turn && this.turnAdvice.has(pending.turn);
+        const anotherRendered = [...this.pendingTurns.values()].some((other) =>
+          other.turn === pending.turn && other.startedAt === pending.startedAt);
+        if (alreadyCommitted || anotherRendered) {
+          this.log?.warn(`第 ${pending.turn} 回合有多个提醒已写入宿主，无法撤回；回合账只提交一次。`);
+        }
+        this.lastAnnouncedTurn = Math.max(this.lastAnnouncedTurn, pending.turn);
+        if (!alreadyCommitted) {
+          this.turnAdvice.set(pending.turn, pending.pick);
+          this.commitAdvicePick(pending.pick);
+        }
+      }
+    }
+    // retired A 不满足 queuedTurnAttempt === A，因而绝不会误清当前 B 的占位。
+    this.clearTurnAttempt(attempt);
+  }
+
+  onEventsSettled(events: readonly EventEnvelope[], outcome: 'delivered' | 'discarded'): void {
+    for (const ev of events) {
+      if (ev.type !== 'hearthstone.turn') continue;
+      // 宿主按 source 广播给同 id 的所有实例；旧实例的迟到回执必须被实例身份挡掉。
+      if (ev.meta?.hearthstoneTurnInstance !== this.turnInstanceId) continue;
+      const attempt = ev.meta?.hearthstoneTurnAttempt;
+      if (typeof attempt !== 'number' || !Number.isSafeInteger(attempt)) continue;
+      const pending = this.pendingTurns.get(attempt) ?? this.retiredTurnAttempts.get(attempt);
+      if (!pending || pending.senderKey !== ev.senderKey) continue;
+      this.settleTurnAttempt(attempt, ev.cursor, outcome);
+    }
+  }
+
+  private withRepeatNote(text: string): string {
+    const { text: out, pick } = this.previewRepeatNote(text);
+    this.commitAdvicePick(pick);
+    return out;
   }
 
   /**
@@ -1505,7 +1812,7 @@ export class HearthstoneWorld implements World {
 
   private saveCelebrated(): void {
     try {
-      writeFileSync(this.celebratedPath, JSON.stringify({ keys: [...this.celebrated].slice(-CELEBRATED_KEEP) }, null, 2), 'utf8');
+      writeAtomicSync(this.celebratedPath, JSON.stringify({ keys: [...this.celebrated].slice(-CELEBRATED_KEEP) }, null, 2));
     } catch (error) {
       this.log?.warn(`庆祝记录没能存下来:${(error as Error).message}`);
     }
@@ -1524,7 +1831,7 @@ export class HearthstoneWorld implements World {
 
   private saveArenaDeck(): void {
     try {
-      writeFileSync(this.arenaPath, JSON.stringify({ cards: this.arenaDeck }, null, 2), 'utf8');
+      writeAtomicSync(this.arenaPath, JSON.stringify({ cards: this.arenaDeck }, null, 2));
     } catch (error) {
       this.log?.warn(`竞技场牌组没能存下来:${(error as Error).message}`);
     }
@@ -1553,7 +1860,7 @@ export class HearthstoneWorld implements World {
 
   private saveArenaMeta(): void {
     try {
-      writeFileSync(this.metaPath, JSON.stringify(this.arenaMeta, null, 2), 'utf8');
+      writeAtomicSync(this.metaPath, JSON.stringify(this.arenaMeta, null, 2));
     } catch (error) {
       this.log?.warn(`打法笔记没能存下来:${(error as Error).message}`);
     }
@@ -1655,11 +1962,17 @@ export class HearthstoneWorld implements World {
     }
   }
 
-  private saveArenaPlan(): void {
+  private saveArenaPlan(): boolean {
     try {
-      writeFileSync(this.planPath, JSON.stringify(this.arenaPlan, null, 2), 'utf8');
+      if (this.arenaPlan === null) {
+        if (existsSync(this.planPath)) unlinkSync(this.planPath);
+      } else {
+        writeAtomicSync(this.planPath, JSON.stringify(this.arenaPlan, null, 2));
+      }
+      return true;
     } catch (error) {
       this.log?.warn(`牌组推演没能存下来:${(error as Error).message}`);
+      return false;
     }
   }
 
@@ -1684,7 +1997,7 @@ export class HearthstoneWorld implements World {
 
     if (add || drop) {
       if (!this.cfg.styleWritable) {
-        return '使用者关掉了「允许她自己改打法档案」，所以没写。要开的话让他在设置里打开。';
+        return '使用者关掉了「允许自己改打法档案」，所以没写。要开的话让他在设置里打开。';
       }
     }
 
@@ -1700,12 +2013,12 @@ export class HearthstoneWorld implements World {
     if (drop) return dropStyleLine(this.styleDir, drop).message;
 
     // 读的时候顺手把骨架立起来 —— 别依赖 start() 一定先跑过。
-    // 否则在极端时序下她会读到一句「按说该建一个」，那看起来像故障，其实只是还没轮到。
+    // 否则在极端时序下会读到一句「按说该建一个」，那看起来像故障，其实只是还没轮到。
     ensureStyle(this.styleDir);
     const text = readStyle(this.styleDir);
     if (text === null) {
       return `还没有打法档案，而且建不进去 —— 路径是 ${stylePath(this.styleDir)}。`
-        + '写不进去的话她这一轮只能凭印象说，别装作有立场。';
+        + '写不进去的话这一轮只能凭印象说，别装作有立场。';
     }
     const n = styleLineCount(text);
     if (n === 0) {
@@ -1725,14 +2038,13 @@ export class HearthstoneWorld implements World {
    * 他那份「习惯怎么打」。
    *
    * 读的时候必须连样本量一起给 —— 「按建议打 68%」在一个 6 个决策点的样本上
-   * 和在一个 400 个决策点上的样本上，完全是两回事。她会拿去说给人听，
-   * 所以这个数怎么来的，也得一起说出来。
+   * 和在一个 400 个决策点上的样本上，完全是两回事。
    */
   private hisStyleReceipt(args: Record<string, unknown>): string {
     const add = typeof args.add === 'string' ? args.add.trim() : '';
     if (add) {
       if (!this.cfg.styleWritable) {
-        return '使用者关掉了「允许她自己改打法档案」，所以没写。要开的话让他在设置里打开。';
+        return '使用者关掉了「允许自己改打法档案」，所以没写。要开的话让他在设置里打开。';
       }
       return addHisLine(this.styleDir, add).message;
     }
@@ -1753,13 +2065,18 @@ export class HearthstoneWorld implements World {
       + '他习惯怎么打不能拿来盖掉这一回合的数字。';
   }
 
-  private async planReceipt(args: Record<string, unknown>): Promise<string> {
+  private async planReceipt(args: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
     const action = typeof args.action === 'string' ? args.action : 'read';
 
     if (action === 'clear') {
-      const had = this.arenaPlan !== null;
+      this.arenaGeneration += 1;
+      const prev = this.arenaPlan;
+      const had = prev !== null;
       this.arenaPlan = null;
-      this.saveArenaPlan();
+      if (!this.saveArenaPlan()) {
+        this.arenaPlan = prev;
+        return '清除失败：推演缓存文件无法写入或删除，已保留原推演结果。';
+      }
       return had ? '已清掉上次的推演结果。' : '本来就没有推演结果。';
     }
 
@@ -1789,6 +2106,8 @@ export class HearthstoneWorld implements World {
     }
 
     // ---- generate ----
+    // 任何早退都算一次新意图：缓存命中、无模型、空牌组也必须使旧在途请求失效。
+    const gen = ++this.arenaGeneration;
     if (!this.arenaDeck.length) {
       return '还没有牌组快照 —— 先用 hearthstone_draft 把选到的牌记下来（一张张 pick），'
         + '有牌才能推「这套牌怎么赢」。';
@@ -1807,8 +2126,9 @@ export class HearthstoneWorld implements World {
         + '只是「这套牌怎么赢」得靠你自己看牌组推，工具这边只给得出曲线和构成。';
     }
 
+    const deckSnapshot = [...this.arenaDeck];
     const heroClass = typeof args.heroClass === 'string' ? args.heroClass.trim() : '';
-    const built = deckListForModel(this.arenaDeck);
+    const built = deckListForModel(deckSnapshot);
     const system = [
       '你是炉石传说竞技场教练。给你一套刚选完的牌，你要说清它靠什么赢。',
       RULES_FOR_MODEL,
@@ -1821,34 +2141,54 @@ export class HearthstoneWorld implements World {
     ].join('\n');
     const user = [
       heroClass ? `职业：${heroClass}` : '职业：未知（按牌面判断）',
-      `牌组 ${this.arenaDeck.length} 张：`,
+      `牌组 ${deckSnapshot.length} 张：`,
       built.cards,
       '',
       `曲线：${built.curve}；平均 ${built.stats.averageCost} 费；随从 ${built.stats.minions} / 法术 ${built.stats.spells}；解场 ${built.stats.removal}（群体 ${built.stats.aoe}）。`,
       heroClass ? '' : '注意：竞技场卡组可能跨职业，别按单一职业的思路套。',
     ].filter((x) => x !== undefined).join('\n');
 
-    const text = await askModel(cfg, { system, user, maxTokens: 800, temperature: 0.4, timeoutMs: 25000 });
+    const res = await this.askTrackedModel(
+      cfg,
+      { system, user, maxTokens: 800, temperature: 0.4, timeoutMs: 25000, signal },
+      'hearthstone:plan',
+    );
+    if (this.arenaGeneration !== gen) {
+      return '竞技场缓存已在推演期间被清空或更新，本次推演结果已丢弃。';
+    }
+    if (res?.aborted || signal?.aborted) {
+      return '推演已取消。';
+    }
+    const text = res?.text;
     if (!text || !text.trim()) {
-      return '模型没返回（超时、限流或网络问题）。这次没花钱存下任何结论 —— '
-        + '稍后可以再试；规则给的对局建议不受影响。';
+      return '模型未返回有效结果（超时、限流或网络异常），本次未保存推演结论；稍后可再试，规则给的对局建议不受影响。';
     }
 
+    const prevPlan = this.arenaPlan;
     this.arenaPlan = {
       text: text.trim(),
       savedAt: new Date().toISOString(),
       model: cfg.model,
       heroClass,
-      deck: [...this.arenaDeck],
+      deck: [...deckSnapshot],
     };
-    this.saveArenaPlan();
+    if (!this.saveArenaPlan()) {
+      this.arenaPlan = prevPlan;
+      return [
+        `【这套牌怎么赢】${cfg.model} 本次推演未能写入磁盘（已回滚缓存，下次需要重新生成）：`,
+        '',
+        text.trim(),
+        '',
+        `依据：${deckSnapshot.length} 张 · 平均 ${built.stats.averageCost} 费 · 随从 ${built.stats.minions} / 法术 ${built.stats.spells} · 解场 ${built.stats.removal}。`,
+      ].join('\n');
+    }
 
     return [
       `【这套牌怎么赢】${cfg.model} 按炉石规则推的（已存本地，牌组不变不用重跑）`,
       '',
       this.arenaPlan.text,
       '',
-      `依据：${this.arenaDeck.length} 张 · 平均 ${built.stats.averageCost} 费 · 随从 ${built.stats.minions} / 法术 ${built.stats.spells} · 解场 ${built.stats.removal}。`,
+      `依据：${deckSnapshot.length} 张 · 平均 ${built.stats.averageCost} 费 · 随从 ${built.stats.minions} / 法术 ${built.stats.spells} · 解场 ${built.stats.removal}。`,
       '这是推演不是判决 —— 你不同意就说出为什么，别照着念。',
     ].join('\n');
   }
@@ -1862,6 +2202,7 @@ export class HearthstoneWorld implements World {
   private draftReceipt(args: Record<string, unknown>): string {
     if (args.reset === true) {
       this.arenaDeck = [];
+      this.arenaGeneration += 1;
       this.saveArenaDeck();
       return '竞技场牌组已清空,下一轮从头记。';
     }
@@ -1885,6 +2226,7 @@ export class HearthstoneWorld implements World {
       const card = resolveArenaCard(pick);
       const stored = card?.found ? card.id : pick;
       this.arenaDeck.push(stored);
+      this.arenaGeneration += 1;
       this.saveArenaDeck();
       const stats = deckStats(this.arenaDeck);
       if (card?.found) {
@@ -1915,22 +2257,46 @@ export class HearthstoneWorld implements World {
     return Boolean(s.me.heroClass || s.opponent.heroClass) || s.turn > 0;
   }
 
-  private enqueue(task: () => Promise<void>): void {
-    this.chain = this.chain.then(task).catch((error: unknown) => {
+  private enqueue(task: () => Promise<unknown>): void {
+    this.chain = this.chain.then(async () => { await task(); }).catch((error: unknown) => {
       this.log?.warn(`推送炉石事件失败:${(error as Error).message}`);
     });
   }
 
-  private async push(type: string, senderKey: string, text: string, trigger: TriggerMode): Promise<void> {
+  private async push(
+    type: string,
+    senderKey: string,
+    text: string,
+    trigger: TriggerMode,
+    opts?: { tags?: EventTag[]; meta?: Record<string, unknown>; deferredRender?: () => string | null },
+  ): Promise<{ status: 'deferred' | 'delivered' | 'archived' | 'not-sent'; cursor?: number }> {
     const host = this.host;
-    if (!host) return;
-    await host.pushEvent({
+    if (!host) return { status: 'not-sent' };
+    if (opts?.deferredRender && typeof host.pushDeferred === 'function' && host.pushDeferred.length > 0) {
+      host.pushDeferred({
+        type,
+        senderKey,
+        ...(opts.tags ? { tags: opts.tags } : {}),
+        ...(opts.meta ? { meta: opts.meta } : {}),
+        render: () => opts.deferredRender!(),
+      }, { trigger });
+      return { status: 'deferred' };
+    }
+    const finalText = opts?.deferredRender ? opts.deferredRender() : text;
+    if (!finalText) return { status: 'not-sent' };
+    const envelope = await host.pushEvent({
       type,
       source: this.id,
       senderKey,
       ts: nowIso(),
-      text,
+      text: finalText,
+      ...(opts?.tags ? { tags: opts.tags } : {}),
+      ...(opts?.meta ? { meta: opts.meta } : {}),
     }, { trigger });
+    return {
+      status: envelope.contextDelivery === 'archive-only' ? 'archived' : 'delivered',
+      ...(typeof envelope.cursor === 'number' ? { cursor: envelope.cursor } : {}),
+    };
   }
 
   /* ---------- 工具 ---------- */
@@ -1949,7 +2315,8 @@ export class HearthstoneWorld implements World {
         description: ADVICE_DECL.description,
         parameters: ADVICE_DECL.parameters,
         tags: ADVICE_DECL.tags,
-        handler: async (args) => ({ text: await this.adviceReceipt(args.full !== false) }),
+        interruptible: true,
+        handler: async (args, ctx) => ({ text: await this.adviceReceipt(args.full !== false, ctx?.signal) }),
       },
       {
         name: DRAFT_DECL.name,
@@ -1970,7 +2337,8 @@ export class HearthstoneWorld implements World {
         description: PLAN_DECL.description,
         parameters: PLAN_DECL.parameters,
         tags: PLAN_DECL.tags,
-        handler: async (args) => ({ text: await this.planReceipt(args) }),
+        interruptible: true,
+        handler: async (args, ctx) => ({ text: await this.planReceipt(args, ctx?.signal) }),
       },
       {
         name: STYLE_DECL.name,
@@ -2046,6 +2414,31 @@ export class HearthstoneWorld implements World {
     };
   }
 
+  /** 把取消、真实用量上报与请求跟踪放在同一个 Promise 里，stop 等待它就不会丢账。 */
+  private askTrackedModel(cfg: LlmConfig, req: LlmRequest, label: 'hearthstone:plan' | 'hearthstone:advice'): Promise<LlmResult | null> {
+    const controller = new AbortController();
+    const parent = req.signal;
+    const onParentAbort = (): void => controller.abort();
+    if (parent?.aborted) controller.abort();
+    else parent?.addEventListener('abort', onParentAbort, { once: true });
+    this.llmControllers.add(controller);
+
+    let pending: Promise<LlmResult | null>;
+    pending = (async () => {
+      try {
+        const res = await askModelWithUsage(cfg, { ...req, signal: controller.signal });
+        if (res?.usage) this.host?.reportUsage?.(res.usage, { model: cfg.model, label });
+        return res;
+      } finally {
+        parent?.removeEventListener('abort', onParentAbort);
+        this.llmControllers.delete(controller);
+        this.llmInflight.delete(pending);
+      }
+    })();
+    this.llmInflight.add(pending);
+    return pending;
+  }
+
   /**
    * 问一次模型,要一段独立判断。
    *
@@ -2057,7 +2450,7 @@ export class HearthstoneWorld implements World {
    * 想开就在设置里打开;开了就把超时压到 3 秒,宁可拿不到也别堵着。
    * 每回合自动推的那句**永远不调** —— 那里必须零延迟。
    */
-  private async modelSecondOpinion(snapshot: GameSnapshot, advice: ReturnType<typeof advise>): Promise<string | null> {
+  private async modelSecondOpinion(snapshot: GameSnapshot, advice: ReturnType<typeof advise>, signal?: AbortSignal): Promise<string | null> {
     const cfg = this.llmConfig();
     if (!cfg || this.cfg.llmAdvice === false) return null;
 
@@ -2075,12 +2468,19 @@ export class HearthstoneWorld implements World {
       advice.candidates.map((c) => `- ${c}`).join('\n'),
     ].join('\n');
 
-    const text = await askModel(cfg, { system, user, maxTokens: 200, temperature: 0.3, timeoutMs: 3000 });
-    if (!text) this.log?.warn('模型第二意见没拿到,只给规则结果。');
+    const generation = this.lifecycleGeneration;
+    const res = await this.askTrackedModel(
+      cfg,
+      { system, user, maxTokens: 200, temperature: 0.3, timeoutMs: 3000, signal },
+      'hearthstone:advice',
+    );
+    if (this.lifecycleGeneration !== generation) return null;
+    const text = res?.text ?? null;
+    if (!text && !res?.aborted && !signal?.aborted) this.log?.warn('模型第二意见没拿到,只给规则结果。');
     return text;
   }
 
-  private async adviceReceipt(full: boolean): Promise<string> {
+  private async adviceReceipt(full: boolean, signal?: AbortSignal): Promise<string> {
     const snapshot = this.lastSnapshot ?? this.parser.snapshot();
     if (!snapshot) return this.noGameReceipt();
     if (snapshot.ended) {
@@ -2096,7 +2496,7 @@ export class HearthstoneWorld implements World {
         + '你现在看到的场攻,他有机会换掉,最好按「最坏情况」那个数算斩杀。\n\n';
     const base = head + renderAdvice(advice, snapshot);
 
-    const second = await this.modelSecondOpinion(snapshot, advice);
+    const second = await this.modelSecondOpinion(snapshot, advice, signal);
     if (!second) return base;
     return `${base}\n\n【模型的判断】\n${second}`;
   }
@@ -2104,7 +2504,7 @@ export class HearthstoneWorld implements World {
   private lastGameReceipt(withActions: boolean): string {
     const data = this.readArchive();
     if (!data) {
-      return '还没有留下上一局的记录。她只记录自己在运行时打完的局 —— 装扩展之前打的、或者中途重启过的,读不到。';
+      return '还没有留下上一局的记录。这里只记录扩展在运行时打完的局 —— 装扩展之前打的、或者中途重启过的,读不到。';
     }
     return renderArchive(data, withActions);
   }
@@ -2170,9 +2570,14 @@ export class HearthstoneWorld implements World {
       'hs.style': this.cfg.voice === 'his'
         ? `【现在站在他的立场上】下面是他的习惯，不是你的。用「你」说他。\n${hisStyleForPrompt(this.styleDir)}`
         : `【现在用你自己的立场】下面这份是你写的。\n${styleForPrompt(this.styleDir, this.playedGameCount())}${this.habitNote() ? `\n\n${this.habitNote()}` : ''}`,
-      // 最近几十局的战绩。她说「你最近打得怎么样」时靠这个，不用去翻存档 ——
-      // 而存档只有最后一局，session 还会轮转。
-      'hs.recent': this.recentGamesText(),
+      // 未在对局中且已有历史记录时只注入一行汇总，避免把近局清单反复灌入前缀。
+      'hs.recent': (() => {
+        if (snapshot) return this.recentGamesText();
+        const games = this.loadRecentGames();
+        if (!games.length) return this.recentGamesText();
+        const wins = games.filter((g) => g.result === 'won').length;
+        return `最近归档 ${games.length} 局（胜 ${wins} 局）；需要复盘时调用 hearthstone_last_game。`;
+      })(),
     };
   }
 
@@ -2494,7 +2899,7 @@ export class HearthstoneWorld implements World {
         label: '形象包',
         state: 'loading',
         hint: '随包带了一个形象包，但载入时不装（装的动作要在面板上点）。点了之后装进 data/figures/groove-game/，'
-          + '装完还得去换装页把她选成「DeepSeek 大肥鱼 · 对局版」—— 装好和用上是两步。',
+          + '装完还得去换装页选成「DeepSeek 大肥鱼 · 对局版」—— 装好和用上是两步。',
       };
     }
     /* 未装（missing）和别人的包（occupied）都算「没启用」，不是故障；装失败才是故障。 */
@@ -2502,6 +2907,141 @@ export class HearthstoneWorld implements World {
       ? 'error'
       : (pack.status === 'occupied' || pack.status === 'missing' ? 'offline' : 'online');
     return { label: '形象包', state, hint: pack.message };
+  }
+
+  private storageParts(language: Language): StoragePart[] {
+    const zh = language === 'zh';
+    const safeStat = (fn: () => string): string => {
+      try { return fn(); } catch { return zh ? '读取失败' : 'Read failed'; }
+    };
+    const unlinkIfExists = (p: string): void => {
+      if (existsSync(p)) unlinkSync(p);
+    };
+    return [
+      {
+        key: 'hearthstone-archive',
+        label: zh ? '上一局对局存档' : 'Last match archive',
+        kind: 'disk',
+        location: this.archivePath,
+        note: zh
+          ? '清除最近一局的逐回合回放存档（hearthstone_last_game 将读不到上一局）。'
+          : 'Clears the turn-by-turn replay of the last match; hearthstone_last_game will no longer find it.',
+        stat: () => safeStat(() => {
+          if (!existsSync(this.archivePath)) return zh ? '空' : 'Empty';
+          const size = (statSync(this.archivePath).size / 1024).toFixed(1);
+          return zh ? `1 局（${size} KB）` : `1 match (${size} KB)`;
+        }),
+        clear: () => {
+          unlinkIfExists(this.archivePath);
+          this.archivedThisGame = false;
+          return zh ? '已清除上一局对局存档。' : 'Last match archive cleared.';
+        },
+      },
+      {
+        key: 'hearthstone-games',
+        label: zh ? '对局历史与庆祝记录' : 'Match history and celebration records',
+        kind: 'disk',
+        location: this.gamesPath,
+        danger: true,
+        note: zh
+          ? '清除全部历史对局与胜场庆祝指纹，不可恢复（近局战绩与他方统计源数据将清空）。'
+          : 'Irreversibly clears all match history and victory celebration fingerprints, including recent results and player statistics.',
+        stat: () => safeStat(() => {
+          const count = this.loadRecentGames().length;
+          return zh ? `${count} 局` : `${count} ${count === 1 ? 'match' : 'matches'}`;
+        }),
+        clear: () => {
+          unlinkIfExists(this.gamesPath);
+          unlinkIfExists(this.celebratedPath);
+          this.celebrated.clear();
+          return zh ? '已清除对局历史与庆祝记录。' : 'Match history and celebration records cleared.';
+        },
+      },
+      {
+        key: 'hearthstone-arena',
+        label: zh ? '竞技场选牌与推演缓存' : 'Arena draft and plan cache',
+        kind: 'disk',
+        location: this.opts.dataDir,
+        note: zh
+          ? '清空当前竞技场牌组快照、职业笔记及胜负主线推演缓存。'
+          : 'Clears the current arena deck snapshot, class notes, and generated game-plan cache.',
+        stat: () => {
+          const cards = this.arenaDeck.length;
+          const classes = Object.keys(this.arenaMeta).length;
+          return zh
+            ? `${cards} 张牌 · ${classes} 个职业笔记${this.arenaPlan ? ' · 含推演' : ''}`
+            : `${cards} cards · ${classes} class notes${this.arenaPlan ? ' · plan cached' : ''}`;
+        },
+        clear: () => {
+          // 删除的第一动就使在途生成失效；即使后续回滚，旧请求也不得复活缓存。
+          this.arenaGeneration += 1;
+          unlinkManyWithRollback([this.arenaPath, this.metaPath, this.planPath]);
+          this.arenaDeck = [];
+          this.arenaMeta = {};
+          this.arenaPlan = null;
+          return zh ? '已清空竞技场选牌、笔记与推演缓存。' : 'Arena draft, class notes, and plan cache cleared.';
+        },
+      },
+      {
+        key: 'hearthstone-diary',
+        label: zh ? '炉石复盘日记与感想' : 'Hearthstone review diary and thoughts',
+        kind: 'disk',
+        location: this.diaryDir(),
+        danger: true,
+        note: zh
+          ? '清除复盘日记与感想条目（不可恢复；若指向外部同步目录，仅清理日记与感想文件）。'
+          : 'Irreversibly clears review diary entries and thoughts; in a custom sync directory, only diary and thought files are removed.',
+        stat: () => safeStat(() => {
+          const dir = this.diaryDir();
+          if (!existsSync(dir)) return zh ? '0 天 · 0 条感想' : '0 days · 0 thoughts';
+          const mdCount = readdirSync(dir).filter((f) => DIARY_FILE_RE.test(f)).length;
+          const thoughtCount = readThoughts(dir, 500).length;
+          return zh ? `${mdCount} 天日记 · ${thoughtCount} 条感想` : `${mdCount} diary days · ${thoughtCount} thoughts`;
+        }),
+        clear: () => {
+          const dir = this.diaryDir();
+          if (!existsSync(dir)) return zh ? '没有可清除的炉石日记。' : 'No Hearthstone diary to clear.';
+          const isCustom = Boolean((this.cfg.diaryDir ?? '').trim());
+          if (!isCustom) {
+            rmSync(dir, { recursive: true, force: true });
+            return zh ? '已清空默认炉石复盘日记与感想目录。' : 'Default Hearthstone review diary and thoughts directory cleared.';
+          }
+          let removed = 0;
+          for (const entry of readdirSync(dir)) {
+            if (DIARY_FILE_RE.test(entry) || entry === '感想.jsonl') {
+              unlinkSync(join(dir, entry));
+              removed += 1;
+            }
+          }
+          return zh
+            ? `已从自定义目录清理 ${removed} 份炉石日记/感想文件。`
+            : `Removed ${removed} Hearthstone diary/thought files from the custom directory.`;
+        },
+      },
+      {
+        key: 'hearthstone-style',
+        label: zh ? '打法立场与习惯档案' : 'Play-style and habit profiles',
+        kind: 'disk',
+        location: this.styleDir,
+        danger: true,
+        note: zh
+          ? '清除己方打法立场（hearthstone-style.md）与自动汇总的他方习惯档案，不可恢复。'
+          : 'Irreversibly clears your play-style profile (hearthstone-style.md) and the automatically generated player-habit profile.',
+        stat: () => safeStat(() => {
+          const mine = readStyle(this.styleDir);
+          const count = mine ? styleLineCount(mine) : 0;
+          const hasHis = existsSync(hisStylePath(this.styleDir));
+          return zh
+            ? `己方 ${count} 条${hasHis ? ' · 含他方统计' : ''}`
+            : `Mine: ${count} lines${hasHis ? ' · player stats included' : ''}`;
+        }),
+        clear: () => {
+          unlinkIfExists(stylePath(this.styleDir));
+          unlinkIfExists(hisStylePath(this.styleDir));
+          return zh ? '已清除打法立场与习惯档案。' : 'Play-style and habit profiles cleared.';
+        },
+      },
+    ];
   }
 
   webUi(language: Language = 'zh'): WorldWebUiDecl {
@@ -2553,11 +3093,12 @@ export class HearthstoneWorld implements World {
       panels: [{
         id: 'main',
         title: '陪打',
-        description: '一眼看局面,点一下让她说这回合怎么打。',
+        description: '一眼看局面,点一下出这回合怎么打的建议。',
         defaultOpen: true,
       }],
       invoke: (panel, method, args) => this.panelInvoke(panel, method, args),
       config: hearthstoneConfigGroups(),
+      storage: this.storageParts(language),
       promptDocs: [{
         key: `worlds.${HEARTHSTONE_ID}.envPrompt`,
         title: t.promptTitle,
@@ -2649,15 +3190,24 @@ export const HEARTHSTONE_DESCRIBE = {
     // 面板按钮属于炉石这个 World，算不了「用电脑的理由」。
     // 所以她收到之后要做的是 `pet_ask` 问一句，等他答了才动。
     { type: 'hearthstone.selfplay', description: { zh: '他在面板上按了「这局你来打」。收到后先用 pet_ask 问一句，他答应了才动手。', en: 'He pressed "you take this one" on the panel. Ask him in a bubble first; act only after he agrees.' }, trigger: 'flush' as const },
-    { type: 'hearthstone.turn', description: { zh: '轮到本地玩家行动,附当前双方状态。', en: "It is the operator's turn, with both sides' state." }, trigger: 'debounce' as const },
+    { type: 'hearthstone.turn', description: { zh: '轮到本地玩家行动,附当前双方状态。', en: "It is the operator's turn, with both sides' state." }, trigger: 'debounce' as const, tags: ['snapshot'] as const },
     { type: 'hearthstone.alert', description: { zh: '关键节点:残血、被铺场、进入斩杀线、牌库见底之类。', en: 'A moment that matters: low health, being swarmed, lethal range, running out of cards.' }, trigger: 'flush' as const },
     { type: 'hearthstone.game.end', description: { zh: '这局结束和结果。', en: 'The match ended, and how.' }, trigger: 'flush' as const },
     // 面板上那个按钮推的就是这一条。它是**他主动问的**,不是自动播报,
     // 所以和 turn / alert 分开:她该用回答的口气,不是解说的口气。
-    { type: 'hearthstone.ask', description: { zh: '他在扩展页上点了「让她看这回合」,附当前局面与机械建议。', en: 'The operator clicked "ask about this turn" on the panel, with the board and the mechanical advice.' }, trigger: 'flush' as const },
+    { type: 'hearthstone.ask', description: { zh: '他在扩展页上点了「看这回合」,附当前局面与机械建议。', en: 'The operator clicked "ask about this turn" on the panel, with the board and the mechanical advice.' }, trigger: 'flush' as const },
     // 环境没准备好：Coopani 版本太旧、宿主补丁打不上、或找不到宿主包。
     // 存在的理由是**只有她能让人抬头** —— 设置页那盏红灯他不一定会去看，
     // 简介里的版本要求他也不一定读。启动后说一句，是他唯一会注意到的渠道。
     { type: 'hearthstone.setup', description: { zh: '这台机器的环境不对:Coopani 版本太旧、宿主动作补丁打不上,或者找不到宿主包。附一句该怎么跟他说。', en: 'Something about this machine is off: Coopani too old, host patch blocked, or host pack missing. Carries what to tell the operator.' }, trigger: 'flush' as const },
+    {
+      type: 'hearthstone.handoff',
+      description: {
+        zh: '用户交接（handoff）结束时顺路搭车（piggyback）补齐当前对局的回合、双方血量护甲与水晶快照。',
+        en: 'Piggybacked match snapshot after user handoff ends, refreshing turn, health/armor and mana.',
+      },
+      trigger: 'piggyback' as const,
+      tags: ['snapshot'] as const,
+    },
   ],
 };

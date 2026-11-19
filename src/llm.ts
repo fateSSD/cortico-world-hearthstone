@@ -13,6 +13,8 @@
  *
  * 失败一律返回 null,调用方降级成纯规则结果 —— 模型是加分项,不是命脉。
  */
+import type { LLMUsage } from 'cortico/core/types.ts';
+
 export interface LlmConfig {
   apiKey: string;
   baseUrl: string;
@@ -25,6 +27,47 @@ export interface LlmRequest {
   maxTokens?: number;
   temperature?: number;
   timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+export interface LlmResult {
+  text: string | null;
+  usage?: LLMUsage;
+  aborted?: boolean;
+}
+
+interface RawUsagePayload {
+  prompt_tokens?: unknown;
+  completion_tokens?: unknown;
+  prompt_cache_hit_tokens?: unknown;
+  prompt_cache_miss_tokens?: unknown;
+  prompt_tokens_details?: { cached_tokens?: unknown };
+  completion_tokens_details?: { reasoning_tokens?: unknown };
+}
+
+function asNonNegNum(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined;
+}
+
+function parseUsage(raw: unknown): LLMUsage | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const u = raw as RawUsagePayload;
+  const promptTokens = asNonNegNum(u.prompt_tokens);
+  const completionTokens = asNonNegNum(u.completion_tokens);
+  if (promptTokens === undefined || completionTokens === undefined) return undefined;
+  const cacheHitTokens = asNonNegNum(u.prompt_cache_hit_tokens)
+    ?? asNonNegNum(u.prompt_tokens_details?.cached_tokens)
+    ?? 0;
+  const cacheMissTokens = asNonNegNum(u.prompt_cache_miss_tokens)
+    ?? Math.max(0, promptTokens - cacheHitTokens);
+  const reasoningTokens = asNonNegNum(u.completion_tokens_details?.reasoning_tokens);
+  return {
+    promptTokens,
+    completionTokens,
+    cacheHitTokens,
+    cacheMissTokens,
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+  };
 }
 
 /** 从若干候选密钥名里取第一个非空的。 */
@@ -36,12 +79,26 @@ export function pickKey(read: (name: string) => string, names: readonly string[]
   return '';
 }
 
-/** 调一次模型。任何失败都返回 null,不抛。 */
-export async function askModel(cfg: LlmConfig, req: LlmRequest): Promise<string | null> {
+/** 调一次模型并返回文本与真实用量。任何失败返回 null，被中止时返回 aborted 标记，不抛。 */
+export async function askModelWithUsage(cfg: LlmConfig, req: LlmRequest): Promise<LlmResult | null> {
   if (!cfg.apiKey) return null;
+  if (req.signal?.aborted) return { text: null, aborted: true };
   const timeoutMs = req.timeoutMs ?? 8000;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onParentAbort = (): void => controller.abort();
+  let signal: AbortSignal = controller.signal;
+  let boundParent = false;
+
+  if (req.signal) {
+    const anyFn = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+    if (typeof anyFn === 'function') {
+      signal = anyFn([controller.signal, req.signal]);
+    } else {
+      req.signal.addEventListener('abort', onParentAbort, { once: true });
+      boundParent = true;
+    }
+  }
 
   try {
     const res = await fetch(`${cfg.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
@@ -59,17 +116,32 @@ export async function askModel(cfg: LlmConfig, req: LlmRequest): Promise<string 
           { role: 'user', content: req.user },
         ],
       }),
-      signal: controller.signal,
+      signal,
     });
 
     if (!res.ok) return null;
-    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-    const text = data.choices?.[0]?.message?.content?.trim();
-    return text ? text : null;
+    const data = (await res.json()) as {
+      choices?: { message?: { content?: string } }[];
+      usage?: unknown;
+    };
+    const usage = parseUsage(data.usage);
+    const text = data.choices?.[0]?.message?.content?.trim() || null;
+    if (!text) return usage ? { text: null, usage } : null;
+    return usage ? { text, usage } : { text };
   } catch {
-    // 超时、断网、JSON 变形 —— 一律当没有
+    // 若由外部 AbortSignal 中止，明确标出 aborted；其余超时/断网/JSON 变形一律返回 null
+    if (req.signal?.aborted) return { text: null, aborted: true };
     return null;
   } finally {
     clearTimeout(timer);
+    if (boundParent && req.signal) {
+      req.signal.removeEventListener('abort', onParentAbort);
+    }
   }
+}
+
+/** 调一次模型。任何失败都返回 null,不抛。 */
+export async function askModel(cfg: LlmConfig, req: LlmRequest): Promise<string | null> {
+  const res = await askModelWithUsage(cfg, req);
+  return res?.text ?? null;
 }

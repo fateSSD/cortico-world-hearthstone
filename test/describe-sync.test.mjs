@@ -42,6 +42,7 @@ test('事件声明：describe.json 的事件表和运行时一致', () => {
   for (const e of HEARTHSTONE_DESCRIBE.events) {
     const mirror = onDisk.events.find((x) => x.type === e.type);
     assert.equal(mirror.trigger, e.trigger, `${e.type} 的 trigger 两边不一致`);
+    assert.deepEqual(mirror.tags ?? [], e.tags ?? [], `${e.type} 的 tags 两边不一致`);
     assert.deepEqual(mirror.description, e.description, `${e.type} 的说明漂了`);
     assert.ok(e.description.zh.trim() && e.description.en.trim(), `${e.type} 少了说明`);
   }

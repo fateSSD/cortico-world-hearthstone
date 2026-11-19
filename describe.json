@@ -175,8 +175,8 @@
         "write"
       ],
       "summary": {
-        "zh": "读/写她自己的打法立场：我怎么说话、我倾向推哪条路（第一人称，不是攻略）。",
-        "en": "Reads and writes her own play style: how she talks and which line she leans toward."
+        "zh": "读/写你的打法立场：怎么说话、倾向推哪条路（第一人称，不是攻略）。",
+        "en": "Reads and writes your own play style: how you talk and which line you lean toward."
       }
     },
     {
@@ -203,7 +203,7 @@
     },
     {
       "name": "hearthstone_diary",
-      "description": "Write the post-match review — why it went the way it did, in your own words. The diary file already records the facts automatically (result, both heroes' hp, lowest hp, which turns your pick and his play diverged). **Do not restate those numbers** — say what the numbers cannot: why the game turned, which single turn was the hinge, what you would look at differently next time. One entry per match. Write it after a loss or after a clear misjudgement; skip it when nothing stands out — a diary full of \"打完了\" is worse than an empty one. First person, under 120 characters, no bullet points. This is also what the panel's 「她最近想到的」 shows.",
+      "description": "Write the post-match review — why it went the way it did, in your own words. The diary file already records the facts automatically (result, both heroes' hp, lowest hp, which turns your pick and his play diverged). **Do not restate those numbers** — say what the numbers cannot: why the game turned, which single turn was the hinge, what you would look at differently next time. One entry per match. Write it after a loss or after a clear misjudgement; skip it when nothing stands out — a diary full of \"打完了\" is worse than an empty one. First person, under 120 characters, no bullet points. This also appears in the diary notes panel.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -226,7 +226,7 @@
       ],
       "summary": {
         "zh": "每局打完记一段复盘（第一人称）：为什么赢/输、哪一手是关键。面板的感想栏读的就是这里。",
-        "en": "Writes her own post-match review; the panel reads it back."
+        "en": "Writes your own post-match review; the panel reads it back."
       }
     },
     {
@@ -334,7 +334,10 @@
         "zh": "轮到本地玩家行动,附当前双方状态。",
         "en": "It is the operator's turn, with both sides' state."
       },
-      "trigger": "debounce"
+      "trigger": "debounce",
+      "tags": [
+        "snapshot"
+      ]
     },
     {
       "type": "hearthstone.alert",
@@ -355,7 +358,7 @@
     {
       "type": "hearthstone.ask",
       "description": {
-        "zh": "他在扩展页上点了「让她看这回合」,附当前局面与机械建议。",
+        "zh": "他在扩展页上点了「看这回合」,附当前局面与机械建议。",
         "en": "The operator clicked \"ask about this turn\" on the panel, with the board and the mechanical advice."
       },
       "trigger": "flush"
@@ -367,6 +370,17 @@
         "en": "Something about this machine is off: Coopani too old, host patch blocked, or host pack missing. Carries what to tell the operator."
       },
       "trigger": "flush"
+    },
+    {
+      "type": "hearthstone.handoff",
+      "description": {
+        "zh": "用户交接（handoff）结束时顺路搭车（piggyback）补齐当前对局的回合、双方血量护甲与水晶快照。",
+        "en": "Piggybacked match snapshot after user handoff ends, refreshing turn, health/armor and mana."
+      },
+      "trigger": "piggyback",
+      "tags": [
+        "snapshot"
+      ]
     }
   ]
 }

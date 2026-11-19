@@ -1,5 +1,17 @@
 # 更新日志
 
+## 1.0.0 — 2026-11-19（Cortico Harness API v6 对齐、前缀瘦身与用量/取消接入）
+
+- **`ENV_PROMPT.md` 大幅瘦身**：从 16,503 字符压至 ~3,050 字符（减幅 ~81.5%），剔除冗长举例与与 `tools()` 重叠的清单，完整保留全部 7 个占位符与核心风控规则（日志断供残影、只据动作记录说打出牌名、以当前实付费用为准、仅嘲讽算墙、疲劳追杀勿劝架墙、所有战吼伤害不入下界、最坏情况斩杀与 `<happy, jump>` 动作规范等）。
+- **未对局历史注入降噪**：`!snapshot` 时 `envPromptVars()['hs.recent']` 改为单行归档统计+按需调工具指引，避免未开局向静态前缀灌入历史战绩。
+- **LLM 取消与真实用量上报**：`src/llm.ts` 扩展 `askModelWithUsage` 与 `LlmRequest.signal`，显式区分 `aborted` 取消状态并在 HTTP 200 空文本但带 `usage` 时仍如实返回供 `host.reportUsage` 记账，去掉无法核实的「没花钱」承诺；为 `hearthstone_advice` 与 `hearthstone_plan` 启用 `interruptible: true` 并透传 `ctx.signal`。
+- **API v6 生命周期与队列原语对齐**：
+  - `hearthstone.turn` 接入两参 `host.pushDeferred`（附旧测试零参兼容降级）+ `['snapshot']`，投递渲染时校验同局/同回合/我方行动并基于当前最新局面重算正文与 `advice`；
+  - 新增同步 `onHandoffEnded()` 会话交接回调（独立 `hearthstone.handoff` 事件，`piggyback` + `['snapshot']`，遵守 `quiet`/`speakTurns`/`musicRunning` 开关并统一护甲格式，渲染时实时生成当前对局快照）；
+  - `webUi().storage` 新增 5 项 `StoragePart`（上局存档、对局流、竞技场草稿/攻略/推演、复盘日记 `DIARY_FILE_RE`、打法档案），移除清理吞错逻辑并在 `unlinkSync` 成功后重置内存态；
+  - 对局版形象包 `groove-game` 升至 `1.3.8`（恢复 `BODY_SCALE = 1` 正常体型并联动底部遮挡自动避让 `avoidLogo`），同步刷新 `figure.js` 与测试注释；
+  - 精简 `RULES_BRIEF`（守住全部 8 个核心机制关键词），清理工具声明、面板描述、日记提示及事件描述中的第三人称「她」，补齐 `tags` 校验并重新同步 `describe.json`。
+
 ## 0.8.5 — 2026-11-16（对局版形象包 1.3.4：跑的时候顺向让，不再原地往返）
 
 - **跑（`run`）时的避让方向改成顺她的朝向**（`pose.sign`，即宿主 `kx` 的符号）。

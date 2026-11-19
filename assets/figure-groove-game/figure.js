@@ -23,30 +23,16 @@ const smooth = (a, b, x) => { const k = clamp((x - a) / (b - a), 0, 1); return k
 const SVGNS = 'http://www.w3.org/2000/svg';
 
 /*
- * 对局版：整只缩到原来的 0.68 倍。
+ * 对局版 1.3.8：已具备自动检测底部窗口并动态避让（avoidLogo）的能力，体型恢复正常比例（BODY_SCALE = 1）。
  *
- * ## 为什么要缩
+ * ## 为什么要保持避让与 hits / extent 联动
  *
- * 2026-11-16，炉石打牌时她走到手牌上挡牌。作者（凡特佬）核过：宿主窗口是**整屏透明**
- * 且永远在最上层（`electron-main.cjs` 的 `alwaysOnTop`），鼠标默认穿透
- * （`setIgnoreMouseEvents(true, { forward })`），只有落在她 hit 圈里才会被吃掉。
- * 也就是说：**形象包改不了窗口层级，挡不挡是位置问题，缩不缩是面积问题**。
- * 位置宿主说了算（漫游），面积这一步是形象包唯一能动的。
- *
- * ## 缩的是哪一层
- *
- * 画布外层套一个 `<g transform>`，绕脚底（128, 256）缩 —— 脚还踩在原来那条线上，
- * 只是人矮了、窄了，占屏面积降到约 46%（0.68²），而且不会像"整只挪走"那样
- * 让脚的落点对不上阴影。
- *
- * ## 必须连 hits / extent 一起缩
- *
- * 宿主 `kit/body.js` 用 `custom.extent ?? EXTENT` 算包围盒、`custom.hits ?? HITS` 算命中圈，
- * 默认值是给了原尺寸的（`EXTENT = [20,12,236,256]`、`HITS = [[128,128,108]]`）。
- * 只缩画面不缩这两个，她画小了却还在**周围的空气**上吃点击 ——
- * 炉石那边就多出一圈看不见的死区，比挡牌更难受。所以下面两个 getter 按同一系数缩。
+ * 宿主窗口整屏透明且永远在最上层（alwaysOnTop），鼠标默认穿透，只有落在命中圈（hits）内才会拦截点击。
+ * 因此不仅外层画布 `<g>` 要跟随缩放与避让偏移（SCALE_T / avoidLogo），宿主 kit/body.js 使用的
+ * 包围盒 `custom.extent` 与点击命中圈 `custom.hits` 也必须通过 `scalePoint` 同步映射坐标，
+ * 避免画面避让移开后原地残留隐形挡牌区，或挪开位置后点不中角色。
  */
-const BODY_SCALE = 0.68;
+const BODY_SCALE = 1;
 const K = BODY_SCALE;
 /** logo 单位绕脚底（128, 256）缩放：脚不动，只往回缩。 */
 const sc = (v, base) => base + (v - base) * K;
@@ -563,7 +549,7 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
   let hopWas = null;
   /** 自己让开手牌的量：舞台像素（给阴影）与 logo 单位（给 `<g>`、包围盒、命中圈、锚点）。 */
   let avoidStage = 0, avoidLogo = 0;
-  /** 让开时不再抬离地面（仅跨牌抛物线大跳 `leapFlight` 时按弧线抬升）。 */
+  /** 让开手牌时保持贴地小碎步，不再触发高空抛物线大跳。 */
   let avoidLift = 0, avoidHold = 0, avoidEngaged = null, avoidMoving = false;
   /*
    * `avoidEngaged` 读作「避让已触发」：idle 站满 0.35s 才允许让开，触发之后保持触发。
@@ -571,7 +557,7 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
    * 真正「锁住落点」靠的是 `avoidSide` 的 ±20px 迟滞：落点不变，偏移跟着宿主走，
    * 画面位置因而停在同一个地方（2026-11-16 改名，原名 `avoidLocked` 容易读成锁偏移）。
    */
-  let avoidSide = 0, leapFlight = null;
+  let avoidSide = 0, avoidPinned = false, prevVisualX = null;
   /** 宿主的阴影（`svg` 的第一个孩子，不在 petG 里），每帧按 BODY_SCALE 缩一次。 */
   let shadowEl = null;
   function mount(petG) {
@@ -646,27 +632,10 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
     const stepDt = clamp(dt, 0, .05);
     let target = 0;
 
-    if (leapFlight && pose) {
-      leapFlight.t += stepDt;
-      const p = clamp(leapFlight.t / leapFlight.dur, 0, 1);
-      const curX = lerp(leapFlight.fromStage, leapFlight.toX, smooth(0, 1, p));
-      avoidStage = curX - pose.cx;
-      const peakPx = Math.min(260, Math.max(120, Math.abs(leapFlight.toX - leapFlight.fromStage) * .28));
-      avoidLift = (4 * p * (1 - p) * peakPx) / S;
-      avoidMoving = false;
-      avoidLogo = (avoidStage / S) * pose.sign;
-      if (p >= 1) {
-        leapFlight = null;
-        avoidLift = 0;
-      }
-      return avoidLogo;
-    }
-
     if (!b?.W || !handAt(b)) {
       avoidHold = 0;
       avoidEngaged = null;
       avoidSide = 0;
-      leapFlight = null;
     } else if (pose) {
       const minX = 104 * S + 8, maxX = b.W - 104 * S - 8;
       const l = b.W * HAND_X1 - HALF_LOGO * S;
@@ -679,11 +648,6 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
       } else {
         const mid = b.W / 2;
         if (mode === 'run') {
-          /*
-           * 跑的时候**顺着她的朝向**让（`pose.sign` 就是 `kx` 的符号 = 她正朝哪边跑）。
-           * 原来按「在中线哪一侧」选的是**远侧**，落地后 `avoidSide` 又按近侧翻转，
-           * 会出现「白白飞过去再飞回来」—— 2026-11-16 审查查出。
-           */
           if (!avoidSide) avoidSide = pose.sign >= 0 ? 1 : -1;
         } else {
           if (!avoidSide) avoidSide = pose.cx - l < r - pose.cx ? -1 : 1;
@@ -691,35 +655,36 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
           else if (avoidSide === 1 && pose.cx <= mid - 20) avoidSide = -1;
         }
         const destX = avoidSide < 0 ? l : r;
-        const visualX = pose.cx + avoidStage;
-        const jumpDist = Math.abs(destX - visualX);
-        // 需要跨过大半个牌区（> 140px）时直接起抛物线飞跃过去，不踩牌面
-        if (jumpDist > 140 && (mode === 'run' || mode === 'walk')) {
-          leapFlight = { fromStage: visualX, toX: destX, t: 0, dur: .85 };
-          avoidMoving = false;
-          avoidLift = 0;
-          avoidLogo = (avoidStage / S) * pose.sign;
-          return avoidLogo;
-        }
         if (mode === 'idle') {
           avoidHold += stepDt;
-          if (avoidHold >= .35 || avoidEngaged !== null) {
+          if (avoidHold >= .35 || avoidEngaged !== null || Math.abs(avoidStage) > 1) {
             avoidEngaged = destX - pose.cx;
             target = avoidEngaged;
           }
-        } else {
+        } else if (mode === 'walk' || mode === 'run') {
           avoidHold = 0;
           avoidEngaged = null;
           target = destX - pose.cx;
+        } else {
+          /* 原地 jump/crouch/air/land 时保持当前水平偏移不动，避免起跳时突然往旁飘 */
+          target = avoidStage;
         }
       }
     }
 
     const d = target - avoidStage;
-    const stepMax = 260 * stepDt;
+    const stepMax = (Math.abs(d) > 200 ? 420 : 260) * stepDt;
     if (Math.abs(d) <= stepMax) avoidStage = target;
     else avoidStage += Math.sign(d) * stepMax;
     avoidMoving = Math.abs(target - avoidStage) > 1;
+    const visualX = pose ? pose.cx + avoidStage : null;
+    const visualVx = visualX !== null && prevVisualX !== null && stepDt > 1e-4
+      ? Math.abs(visualX - prevVisualX) / stepDt
+      : Infinity;
+    avoidPinned = Boolean(
+      pose && b?.W && handAt(b) && (mode === 'walk' || mode === 'run') && !avoidMoving && visualVx < 25
+    );
+    prevVisualX = visualX;
     // spG 在 petG 内部，受外层 scale(kx, ky) 镜像影响；面向左(sign=-1)时必须乘回符号，否则人会和影子反向劈叉
     avoidLogo = (avoidStage / S) * (pose ? pose.sign : 1);
     avoidLift = 0;
@@ -795,7 +760,7 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
   // the ninja run leans her whole body forward from the soles, in a straight line: bent at the waist instead,
   // the bodice comes away from the skirt and its bow and the tops of the legs show at the waist
   let wTilt = 0, wLean = 0, facing = 1;
-  let finMood = 0, tailMood = 0, wagAmp = 0, sitK = 0, walkK = 0, walkBoostK = 0, runK = 0, swingK = 0;
+  let finMood = 0, tailMood = 0, wagAmp = 0, sitK = 0, walkK = 0, walkBoostK = 0, runK = 0, swingK = 0, pinnedK = 0;
   const groupTilt = (mode, tilt, lean) => tilt * wTilt + lean * wLean + runK * 14 * facing;
   const st = { z: {}, alpha: {} };
 
@@ -923,7 +888,8 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
      */
     if (spG) {
       const tx = f1(128 - 128 * K + avoidStep(petG, dt, mode));
-      const hop = hopOf(mode, t) + avoidLift + (avoidMoving ? 11 * Math.abs(Math.sin(Math.PI * 2.2 * t)) : 0);
+      pinnedK = lerp(pinnedK, avoidPinned ? 1 : 0, ease(14, dt));
+      const hop = hopOf(mode, t) * (1 - pinnedK) + avoidLift + (avoidMoving ? 11 * Math.abs(Math.sin(Math.PI * 2.2 * t)) : 0);
       const ty = f1(256 - 256 * K - hop);
       const sig = `${tx} ${ty}`;
       if (sig !== hopWas) {
@@ -955,7 +921,7 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
     const groovePulse = actName === 'groove' && Number(o.bpm) > 0 && grooveAge >= 0 && grooveAge < 240
       ? Math.exp(-grooveAge / 90) : 0;
     facing = Math.sign(o.facing || 1);
-    const walking = mode === 'walk' || mode === 'run', held = mode === 'drag', airborne = mode === 'air';
+    const walking = (mode === 'walk' || mode === 'run') && !avoidPinned, held = mode === 'drag', airborne = mode === 'air';
     /**
      * 这一段是「跨越手牌」那一下的标记,后面头/鳍/呆毛/尾巴/手臂五处都要读,
      * 所以必须在最前面声明 —— 放到手臂那段去声明,前面几处就是 TDZ,
@@ -963,8 +929,8 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
      *
      * leapT 用 modeT:滞空约 0.8~1.0 秒,按比例切三拍(起跳 / 过顶 / 收手)。
      */
-    const leapK = (airborne && o.air === 'leap') || leapFlight ? 1 : 0;
-    const leapT = leapFlight ? clamp(leapFlight.t / leapFlight.dur, 0, 1) * 1.15 : (o.modeT || 0);
+    const leapK = airborne && o.air === 'leap' ? 1 : 0;
+    const leapT = o.modeT || 0;
     /**
      * 落地那一下。`mode === 'land'` 只持续 0.6 秒，手臂/头/尾/鳍/呆毛五处都要读，
      * 和 leapK 一样必须**先声明**再使用（TDZ 是白屏级错误，`node --check` 查不出）。
@@ -1043,11 +1009,11 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
       + flap * 14 * Math.sin(t * 17);
 
     /* legs: the kit hands hip→foot segments sized for Coo; keep their angle (forward = foot to the right) */
-    walkBoostK = lerp(walkBoostK, mode === 'walk' ? 1 : 0, ease(8, dt));
+    walkBoostK = lerp(walkBoostK, mode === 'walk' && !avoidPinned ? 1 : 0, ease(8, dt));
     const walkGait = 1 + 1.15 * walkBoostK;
     const avoidStepPhase = avoidMoving ? 28 * Math.sin(t * 18) : 0;
-    const legA = o.legs.map((l, i) => -Math.atan2(l[2] - l[0], Math.max(4, l[3] - l[1])) * 180 / Math.PI * walkGait + (i ? -avoidStepPhase : avoidStepPhase));
-    const lift = o.legs.map(l => clamp(29 - Math.hypot(l[2] - l[0], l[3] - l[1]), -8, 20) * (1 + .65 * walkBoostK));
+    const legA = o.legs.map((l, i) => lerp(-Math.atan2(l[2] - l[0], Math.max(4, l[3] - l[1])) * 180 / Math.PI * walkGait, 0, pinnedK) + (i ? -avoidStepPhase : avoidStepPhase));
+    const lift = o.legs.map(l => clamp(29 - Math.hypot(l[2] - l[0], l[3] - l[1]), -8, 20) * (1 + .65 * walkBoostK) * (1 - pinnedK));
     // sitting swaps the lower body for its own drawing (skirt spread on the floor, legs forward) in a
     // couple of frames halfway down, under a little squash; a long crossfade would show both skirts at once
     const sitIn = smooth(.44, .54, sitK), plop = Math.sin(Math.PI * smooth(.3, .8, sitK));
@@ -1055,7 +1021,7 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
     /* arms: swing against the legs when walking, out in the air, flailing when held */
     // running is a ninja run: both arms swept straight back, the whole body leaning forward (groupTilt)
     walkK = lerp(walkK, walking ? 1 : 0, ease(8, dt));
-    runK = lerp(runK, mode === 'run' ? 1 : 0, ease(7, dt));
+    runK = lerp(runK, mode === 'run' && !avoidPinned ? 1 : 0, ease(7, dt));
     // `swing` is whether the walk swings the arms: a pose that sets both arms holds them still
     let aN = 4, aF = -2, swing = walking ? 1 : 0;
     if (airborne) { aN = 40; aF = -30; }
@@ -1348,7 +1314,7 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
       rig?.dispose();
       // 阴影是宿主的，人走了别把避让时加的位移留在上面
       if (shadowEl?.isConnected) shadowEl.removeAttribute('transform');
-      rig = null; canvas = null; fo = null; fxG = null; spG = null; mountedIn = null; shadowEl = null; hopWas = null; avoidStage = 0; avoidLogo = 0; avoidLift = 0; avoidHold = 0; avoidEngaged = null; avoidMoving = false; avoidSide = 0; leapFlight = null; walkBoostK = 0;
+      rig = null; canvas = null; fo = null; fxG = null; spG = null; mountedIn = null; shadowEl = null; hopWas = null; avoidStage = 0; avoidLogo = 0; avoidLift = 0; avoidHold = 0; avoidEngaged = null; avoidMoving = false; avoidSide = 0; avoidPinned = false; prevVisualX = null; walkBoostK = 0; pinnedK = 0;
     },
     /*
      * 包围盒与命中圈跟着 BODY_SCALE 缩。
@@ -1365,8 +1331,8 @@ export async function createWhaleFigure(base = new URL('./', import.meta.url), o
     reset() {
       endFade();
       for (const k in sp) { sp[k].x = 0; sp[k].v = 0; }
-      lastT = null; rootWas = {}; prevTilt = 0; prevYaw = 0; prevLow = 0; headTilt = 0; wTilt = 0; wLean = 0; finMood = 0; tailMood = 0; wagAmp = 0; sitK = 0; walkK = 0; walkBoostK = 0; runK = 0; swingK = 0;
-      hopWas = null; avoidStage = 0; avoidLogo = 0; avoidLift = 0; avoidHold = 0; avoidEngaged = null; avoidMoving = false; avoidSide = 0; leapFlight = null;
+      lastT = null; rootWas = {}; prevTilt = 0; prevYaw = 0; prevLow = 0; headTilt = 0; wTilt = 0; wLean = 0; finMood = 0; tailMood = 0; wagAmp = 0; sitK = 0; walkK = 0; walkBoostK = 0; runK = 0; swingK = 0; pinnedK = 0;
+      hopWas = null; avoidStage = 0; avoidLogo = 0; avoidLift = 0; avoidHold = 0; avoidEngaged = null; avoidMoving = false; avoidSide = 0; avoidPinned = false; prevVisualX = null;
       if (shadowEl?.isConnected) shadowEl.removeAttribute('transform');
       prevLook = null; prevShut = 0; Object.assign(hl, { dx: 0, dy: 0, scale: 1, quiver: 0, alpha: 1 });
     },

@@ -16,7 +16,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { stripTypeScriptTypes } from 'node:module';
 import { endMarker } from '../src/alerts.ts';
 import { gameKey } from '../src/world.ts';
 
@@ -26,7 +26,10 @@ const PET_PKG = `${COOP_ROOT}/resources/app/node_modules/cortico-world-desktop-p
 /** 桌宠自己的脚本解析器与当前立绘包的词表；拿不到就跳过那几条(换台机器不该红)。 */
 async function petToolkit() {
   try {
-    const script = await import(pathToFileURL(`${PET_PKG}/src/script.ts`).href);
+    // Node 22 拒绝直接 strip node_modules 里的 TS；转换同一份真实源码后经 data URL 执行。
+    const source = readFileSync(`${PET_PKG}/src/script.ts`, 'utf8');
+    const javascript = stripTypeScriptTypes(source, { mode: 'transform' });
+    const script = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString('base64')}`);
     const figure = JSON.parse(readFileSync(`${PET_PKG}/web/whale/figure.json`, 'utf8'));
     return { parseScript: script.parseScript, vocab: figure.vocab };
   } catch {

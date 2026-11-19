@@ -158,12 +158,10 @@ test('装过之后 inspect 报的是真状态（不是「刚装过」）', async
 });
 
 /* ------------------------------------------------------------------
- * 2026-11-16：对局版
+ * 对局版 1.3.8：
  *
- * 作者（凡特佬）核过：宿主窗口整屏透明且永远置顶、鼠标默认穿透，
- * **形象包改不了窗口层级**，能动的只有"占多大"和"点哪儿算她"。
- * 所以炉石这一份做成了小一号（BODY_SCALE）+ 同步收窄的 extent/hits。
- * 下面几条钉住它 —— 谁把缩放删了，画面会悄悄变回原尺寸，界面上看不出来。
+ * 已恢复正常体型（BODY_SCALE = 1）并联动底部窗口自动避让（avoidLogo），
+ * extent / hits 仍须与 BODY_SCALE 和避让偏移同步映射，防止出现错位或隐形点击死区。
  * ------------------------------------------------------------------ */
 
 test('门牌一致：assets 里的 id 就是装进去的那一格', () => {
@@ -172,12 +170,12 @@ test('门牌一致：assets 里的 id 就是装进去的那一格', () => {
   assert.equal(m.id, FIGURE_PACK_ID, 'figure.json 的 id 和 FIGURE_PACK_ID 对不上，装进去换装页也认不出');
 });
 
-test('对局版真的缩了：缩放、包围盒、命中圈三件都在', () => {
+test('对局版恢复正常体型：缩放系数为 1 且包围盒、命中圈与避让联动都在', () => {
   const src = readFileSync(new URL('../assets/figure-groove-game/figure.js', import.meta.url), 'utf8');
   const m = src.match(/const BODY_SCALE = ([\d.]+);/);
   assert.ok(m, 'BODY_SCALE 没了');
   const k = Number(m[1]);
-  assert.ok(k > 0.3 && k < 1, `BODY_SCALE=${k}，不在「缩小」的范围内`);
+  assert.equal(k, 1, `BODY_SCALE=${k}，应为正常体型 1`);
   assert.match(src, /spG\.setAttribute\('transform', SCALE_T\)/, '画布外层没有缩放层');
   assert.match(src, /get extent\(\) \{[\s\S]{0,220}?scalePoint\(EXTENT\)[\s\S]{0,220}?avoidLogo/, 'extent 没跟着缩 / 没跟着避让 —— 包围盒还是原尺寸，她被推开后点不着');
   assert.match(src, /get hits\(\) \{[\s\S]{0,220}?avoidLogo[\s\S]{0,220}?HITS\.map/, 'hits 没跟着缩 / 没跟着避让 —— 点她周围的空气仍然算点她');
@@ -298,8 +296,10 @@ test('自己让开：读得懂宿主写在 petG 上的那个变换', async () =>
 
 test('自己让开：外层、命中圈、气泡锚点、阴影，四样一起偏', () => {
   const src = readFileSync(new URL('../assets/figure-groove-game/figure.js', import.meta.url), 'utf8');
-  assert.match(src, /avoidStep\(petG, dt\)/, 'draw 里根本没调避让，位置永远不会变');
+  assert.match(src, /avoidStep\(petG, dt/, 'draw 里根本没调避让，位置永远不会变');
   assert.match(src, /get anchors\(\) \{[\s\S]{0,260}?avoidLogo/, '气泡锚点没跟着偏 —— 人被推开，气泡还留在原地');
   assert.match(src, /cx \* \(1 - K\) \+ avoidStage/, '阴影没跟着偏 —— 她站在自己影子外面');
-  assert.match(src, /hopOf\(mode, t\) \+ avoidLift/, '跃起没接上 —— 让开时会像平移过去，不是跳过去');
+  assert.match(src, /hopOf\(mode, t\)[\s\S]{0,30}?\+ avoidLift/, '跃起没接上 —— 让开时会像平移过去，不是跳过去');
+  assert.match(src, /avoidPinned[\s\S]{0,160}?visualVx < 25/, '缺少避让钉住停步检测 —— 走到边上停住后脚下会原地空跑');
+  assert.match(src, /pinnedK\s*=\s*lerp\(pinnedK,\s*avoidPinned/, '缺少 pinnedK 平滑收脚 —— 停住后腿部与上下颠簸不会停下');
 });
