@@ -1794,3 +1794,37 @@ test('+N/+N 的 buff 要把血量一起算进去', () => {
   assert.match(prompt, /加固/, '没说出牌名');
   assert.match(prompt, /5\/6/, '没算出 3+2 / 4+2 = 5/6');
 });
+
+test('对手随从的「能不能攻击」按他的回合说,不按我这一手说', () => {
+  /*
+   * 2026-11-19 实测的那一句：
+   *   「对手场攻 15(随从 15)」配「鱼人拉法姆 5/5(不能攻击)、虚空领主 3/7(不能攻击)…」
+   * 同一段话里两套口径 —— 场攻把它们的攻击力算进去了，场面又说他打不出来。
+   * 原因是对面刚铺下来的随从这一刻 canAttack=false（召唤失调），到了他的回合全能打。
+   *
+   * 判据：对手只标**永久**打不了的（cantAttack）；我方仍按这一回合的 canAttack 标。
+   */
+  const s = snap(
+    side({ health: 27, minions: [minion({ id: 1, atk: 2, health: 2, canAttack: false })] }),
+    side({ isLocal: false, health: 6, minions: [
+      minion({ id: 21, atk: 5, health: 5, canAttack: false }),
+      minion({ id: 22, atk: 3, health: 7, taunt: true, canAttack: false }),
+    ] }),
+  );
+  const text = renderAdvice(advise(s), s);
+  const foeLine = text.split('\n').find((l) => l.startsWith('对手:')) ?? '';
+  const meLine = text.split('\n').find((l) => l.startsWith('我:')) ?? '';
+  assert.doesNotMatch(foeLine, /不能攻击/, '对手的召唤失调不该标成「不能攻击」');
+  assert.match(foeLine, /5\/5/, '随从本身仍要列出来');
+  assert.match(meLine, /不能攻击/, '我方这回合打不了就该标出来');
+});
+
+test('对手永久打不了的随从仍然要标出来', () => {
+  const s = snap(
+    side({ health: 27 }),
+    side({ isLocal: false, health: 6, minions: [minion({ id: 21, atk: 0, health: 4, cantAttack: true })] }),
+  );
+  const text = renderAdvice(advise(s), s);
+  const foeLine = text.split('\n').find((l) => l.startsWith('对手:')) ?? '';
+  assert.match(foeLine, /打不了/, '休眠/无法攻击的随从要标出来');
+});

@@ -214,6 +214,21 @@ export function cardName(cardId: string): string {
 }
 
 /**
+ * 这张牌的**牌面费用**(查不到返回 null)。
+ *
+ * 用途只有一个:校验手牌实体读到的 `COST` 是不是真的。
+ * 出牌那一瞬间实体常常还没 dump 完,`COST` 读出来是 0 —— 拿 0 去算斩杀,
+ * 一张 4 费的战吼会被当成白送,背包就会多塞几张不该有的牌。
+ *
+ * **不拿它替代实体费用**:手牌被减费时卡表那个数是错的,只能当校验用。
+ */
+export function cardCostOf(cardId: string): number | null {
+  if (!cardId) return null;
+  const entry = lookupEntry(cardId);
+  return entry ? entry[1] : null;
+}
+
+/**
  * 这张牌的职业(中文,如「法师」「中立」)。查不到返回空串。
  *
  * 用途只有一个:**判断对手打出的牌是不是跨职业**。跨职业牌只可能是发现/偷来的,
@@ -341,6 +356,20 @@ export function battlecryState(fx: CardEffects, me: BattlecryContext): Battlecry
 
   if (/装备武器/.test(cond)) return me.weapon ? 'ready' : 'blocked';
   if (/没有控制其他随从/.test(cond)) return me.minionCount === 0 ? 'ready' : 'blocked';
+  /*
+   * 「控制着光环」—— 圣骑士这一版的光环法术(时序光环/誓缚光环/加速光环…)。
+   *
+   * 日志里光环跟奥秘同一个区(`ZONE=SECRET`),所以判据就是「SECRET 区里
+   * 有没有名字带『光环』的实体」,由 parser 的 `auras` 给。
+   * 2026-11-19 补:此前这条落到 unknown,于是「时间流具象」的战吼从来没被算过 ——
+   * 8 费两张 = 6 点,对面 6 血,正好斩杀,而回执只写「这一条我判断不了」。
+   *
+   * 没传 `auras`(老调用方只给了 weapon/minionCount)时仍按调不了处理,
+   * 不拿 0 当「肯定没有」—— 少说一句比说反一句便宜。
+   */
+  if (/控制着光环/.test(cond)) {
+    return me.auras === undefined ? 'unknown' : me.auras > 0 ? 'ready' : 'blocked';
+  }
   // 「控X」需要种族信息,卡表没存;牌库/历史类判断不了
   return 'unknown';
 }
@@ -351,6 +380,12 @@ export interface BattlecryContext {
   weapon: boolean;
   /** 我场上随从数。 */
   minionCount: number;
+  /**
+   * 头上挂着几个光环(SECRET 区里名字带「光环」的实体数)。
+   *
+   * 可选:`undefined` = 这一层没拿到信息,不该被当成「一定没有光环」。
+   */
+  auras?: number;
 }
 
 /** 一手牌里带前提的战吼,连着前提一起报出来(判断结果在 `state`)。 */

@@ -432,7 +432,14 @@ test('ENV_PROMPT（H2）与 HEARTHSTONE_DESCRIBE 净化合规', () => {
   const envPrompt = readFileSync(new URL('../ENV_PROMPT.md', import.meta.url), 'utf8');
   assert.ok(envPrompt.length <= 3800, `ENV_PROMPT 超长: ${envPrompt.length}`);
   assert.equal(envPrompt.includes('她'), false, 'ENV_PROMPT 含第三人称「她」');
-  assert.match(envPrompt, /\*\*所有战吼伤害\*\*.*绝不并入下界/);
+  /*
+   * 这条原来锁的是「**所有战吼伤害**…绝不并入下界」。
+   * 2026-11-19 改了语义:前提确定满足、能打到脸的战吼现在**逐张进斩杀线**
+   * （报障:8 费两张时间流具象 6 点斩杀被算成差 5）。代码算了、提示词说不算,
+   * 她会自己把这一笔刨掉 —— 所以断言跟着改成「只算前提满足的那部分」。
+   */
+  assert.match(envPrompt, /战吼伤害\*\*前提确定满足、且能打到脸\*\*的才计入/);
+  assert.match(envPrompt, /前提不满足或判不了的不算/, '要说清哪部分仍不进斩杀线');
   for (const t of HEARTHSTONE_DESCRIBE.tools) {
     assert.equal(t.description.includes('她'), false, `${t.name} description 含「她」`);
     assert.equal(/\b(she|her|hers)\b/i.test(t.description), false, `${t.name} description 含英文第三人称`);

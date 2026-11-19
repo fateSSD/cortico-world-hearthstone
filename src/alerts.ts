@@ -469,7 +469,7 @@ export function turnPointText(p: TurnPoint): string {
  * 要交代三件事,缺一件这个数就会骗人:
  *   1. 过墙吃掉了多少攻击力(有嘲讽时)
  *   2. 手牌那部分是怎么凑出来的
- *   3. 哪些东西没算进去(冲锋、战吼伤害、法术伤害加成、无视嘲讽)
+ *   3. 哪些东西没算进去(冲锋、条件不满足的战吼、法术伤害加成、无视嘲讽)
  */
 export function lethalText(now: GameSnapshot): string {
   const plan = planLethal(now);
@@ -487,6 +487,10 @@ export function lethalText(now: GameSnapshot): string {
   }
   if (plan.buffDamage > 0) {
     parts.push(`buff ${plan.buffDamage}(${plan.buffs.map((x) => `${x.name} ${x.cost}费+${x.atk}攻`).join(' + ')})`);
+  }
+  // 战吼也要报(2026-11-19)。它是 total 的一部分,不写出来就成了「账面加起来对不上总数」
+  if (plan.battlecryDamage > 0) {
+    parts.push(`战吼 ${plan.battlecryDamage}(${plan.battlecries.map((x) => `${x.name} ${x.cost}费${x.damage}伤`).join(' + ')})`);
   }
 
   const head = `斩杀线:${parts.join(' + ')} = ${plan.total},对手 ${target} 血(含护甲)`;
@@ -528,7 +532,9 @@ export function lethalText(now: GameSnapshot): string {
     const notes: string[] = [];
     if (taunts.length) notes.push('过墙只按现有攻击力算,没考虑先用法术解墙');
     if (plan.buffDamage > 0) notes.push('buff 假设加在能攻击的随从身上');
-    notes.push('冲锋、战吼伤害、法术伤害加成、无视嘲讽都没算');
+    // 战吼已经从「没算」里摘出去(2026-11-19):确定打得出的那些进了 total,
+    // 只剩「前提不满足/判不了」的那部分没算 —— 这一句不能再笼统地把战吼整个划掉。
+    notes.push('冲锋、随从亡语、法术伤害加成、无视嘲讽都没算;战吼只算了前提确定满足的');
     lines.push(`注意:${notes.join(';')}。`);
   }
 

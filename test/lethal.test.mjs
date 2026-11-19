@@ -253,3 +253,82 @@ test('场上其他持续效果也要点名（不只奥丁）', () => {
   assert.match(said, /锻石师/, '没点名锻石师');
   assert.match(said, /图腾/, '没说出它的效果');
 });
+
+/*
+ * 战吼进斩杀线（2026-11-19，Mr.Q 报障）
+ *
+ * 那一把：圣骑士 8 费，头上挂着誓缚光环，手上两张时间流具象（各 4 费、战吼 3 伤），
+ * 对面术士 6 血、场上一个 3/7 嘲讽。他两张战吼打脸正好 6 点斩杀。
+ *
+ * 当时的回执写的是「过墙后可打脸 0 + buff 1 = 1 → 差 5」，
+ * 外加两条「时间流具象的战吼要『你控制着光环』才有 3 点伤害 —— 这一条我判断不了」。
+ *
+ * 三处叠加成这一个错：
+ *   ① `battlecryState` 只认「装备武器」「没有控制其他随从」，光环 → unknown；
+ *   ② `sureBattlecry` 只取伤害最大的**一张**，同名两张不累加；
+ *   ③ `planLethal` 的战吼压根不进 total，只在 caveats 里写一句「没算进去」。
+ *
+ * 修复后这三条都要有测试兜住，否则下次重构还会退回去。
+ */
+const TIME_019 = '时间流具象'; // 4 费 3/3，战吼 伤害3群，战吼需你控制着光环
+const timeFlowCard = (cost = 4) => ({ id: 1, cardId: 'TIME_019', name: TIME_019, cost, prepared: false });
+
+test('两张战吼要累加：8 费双时间流具象 = 6 点，够斩 6 血', () => {
+  const s = {
+    startedAt: '', turn: 15, activePlayerId: 1, isMyTurn: true, step: '', ended: false, result: null,
+    me: side({
+      mana: 8,
+      auras: [{ cardId: 'BE_146', name: '誓缚光环' }],
+      handCards: [timeFlowCard(), timeFlowCard()],
+      minions: [minion({ id: 5, atk: 4, health: 5 })],
+    }),
+    // 3/7 嘲讽把 4 点场攻全吃掉 —— 这一局的斩杀完全靠战吼，正是原来漏掉的那条线
+    opponent: side({ playerId: 2, isLocal: false, health: 6, minions: [minion({ id: 9, atk: 3, health: 7, taunt: true })] }),
+    boardAttack: { mine: 0, theirs: 0 },
+  };
+  const plan = planLethal(s);
+  assert.equal(plan.faceAtk, 0, '场攻应该全被墙吃掉');
+  assert.equal(plan.battlecryDamage, 6, '两张战吼各 3 点，必须累加');
+  assert.equal(plan.battlecries.length, 2, '同名两张要各记一条');
+  assert.ok(plan.total >= 6, `total 应 ≥ 6，实际 ${plan.total}`);
+  assert.match(plan.caveats.join(' | '), /战吼已计入 6 点/, 'caveats 要说清已经算进去了');
+});
+
+test('没有光环时「战吼需你控制着光环」不算伤害', () => {
+  // 同一个局面，只把头上去掉光环 —— 前提不成立就不许算，宁可说少
+  const s = {
+    startedAt: '', turn: 15, activePlayerId: 1, isMyTurn: true, step: '', ended: false, result: null,
+    me: side({ mana: 8, auras: [], handCards: [timeFlowCard(), timeFlowCard()] }),
+    opponent: side({ playerId: 2, isLocal: false, health: 6 }),
+    boardAttack: { mine: 0, theirs: 0 },
+  };
+  const plan = planLethal(s);
+  assert.equal(plan.battlecryDamage, 0, '没有光环就不该给战吼伤害');
+  assert.ok(plan.total < 6);
+  assert.match(plan.caveats.join(' | '), /没算进上面那个数/, '要说清有一笔没算');
+});
+
+test('只能打随从的战吼不算打脸', () => {
+  // 受伤的掠夺者 BAR_069：4 费 5/10 嘲讽，战吼「伤害6随从」—— 一点脸伤都没有
+  const s = {
+    startedAt: '', turn: 8, activePlayerId: 1, isMyTurn: true, step: '', ended: false, result: null,
+    me: side({ mana: 8, auras: [], handCards: [{ id: 1, cardId: 'BAR_069', name: '受伤的掠夺者', cost: 4, prepared: false }] }),
+    opponent: side({ playerId: 2, isLocal: false, health: 20 }),
+    boardAttack: { mine: 0, theirs: 0 },
+  };
+  assert.equal(planLethal(s).battlecryDamage, 0, '只能打随从的战吼不该算成打脸伤害');
+});
+
+test('随机落点的战吼不算打脸伤害', () => {
+  /*
+   * 「伤害1随机」(火焰杂耍者 AT_094)的落点由随机器决定,可能打自己随从、也可能打自己脸 ——
+   * 下界是 0 点。拿它算斩杀是在赌,和 damage.ts 收直伤法术的口径一致:随机的一律不收。
+   */
+  const s = {
+    startedAt: '', turn: 5, activePlayerId: 1, isMyTurn: true, step: '', ended: false, result: null,
+    me: side({ mana: 5, auras: [], handCards: [{ id: 1, cardId: 'AT_094', name: '火焰杂耍者', cost: 2, prepared: false }] }),
+    opponent: side({ playerId: 2, isLocal: false, health: 3 }),
+    boardAttack: { mine: 0, theirs: 0 },
+  };
+  assert.equal(planLethal(s).battlecryDamage, 0, '随机落点的战吼不该算成打脸');
+});

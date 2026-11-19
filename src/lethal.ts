@@ -11,14 +11,14 @@
  *
  * 水晶由直伤法术和 buff 共享,按「每点费用的收益」从高到低分配。
  *
- * 算不进去的(回执里会明说):冲锋随从召唤、战吼伤害、连击/法术伤害加成、无视嘲讽。
+ * 算不进去的(回执里会明说):冲锋随从召唤、条件不满足的战吼伤害、连击加成、无视嘲讽。
  * 宁可说少,不要给一个打不出来的数。
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { GameSnapshot, MinionView, SideState } from './parser.ts';
 import { damageSpellsInHand, type DamageCard } from './damage.ts';
-import { cardEffects, cardName, passiveOf } from './effects.ts';
+import { battlecryState, cardCostOf, cardEffects, cardName, cardNote, passiveOf } from './effects.ts';
 
 /** 目标的称呼:日志名 → 卡表 → 「未知随从」。别把内部 id 拼进她念的句子。 */
 const targetLabel = (m: { name?: string; cardId?: string }): string =>
@@ -75,6 +75,70 @@ export function buffsInHand(hand: readonly { cardId: string }[]): BuffCard[] {
     const entry = lookupBuff(card.cardId);
     if (!entry) continue;
     out.push({ cardId: card.cardId, name: entry[0], cost: entry[1], atk: entry[2] });
+  }
+  return out;
+}
+
+/** 一张打出去就掉血的战吼随从。 */
+export interface BattlecryCard {
+  cardId: string;
+  name: string;
+  cost: number;
+  /** 这一张的战吼伤害(打脸部分)。 */
+  damage: number;
+}
+
+/**
+ * 手牌里「打出去就能打到脸」的战吼伤害。
+ *
+ * 分三档过滤,标准都是「宁可说少」:
+ *
+ * 1. **前提必须确定满足**(`battlecryState === 'ready'`)。判不了或明确不满足的,
+ *    一律不进这个表 —— 它会在建议里单独写一句「要满足 X 才有 N 点」。
+ * 2. **落点不确定的不算**。两类:只能打随从的(「伤害2群随机随从」),
+ *    和随机分配的(「伤害1随机」「伤害3群随机」)—— 后者的下界是 0 点,
+ *    拿它当斩杀线就是在赌。判据看卡面摘要,和 `damage.ts` 收直伤法术的口径一致。
+ * 3. **同名多张逐张算**。这是 2026-11-19 那次漏斩杀的关键:
+ *    手上两张时间流具象(各 3 伤)、8 水晶正好两张都打得出、对面 6 血,
+ *    而当时的实现只取「最大的一张」,于是永远只报 3 点。
+ *    炉石里同名随从本来就能带两张,不累加等于系统性地少算一半。
+ *
+ * 不算的部分:战吼按**牌面**伤害算 —— 场上的法术伤害加成其实也会落在它身上,
+ * 但这里不加(宁可说少,而且法强已经在那句 caveat 里说明了);
+ * 打出去的随从当回合不能攻击(无冲锋),所以不额外加场攻。
+ */
+export function battlecriesInHand(
+  hand: readonly { cardId: string; cost?: number; name?: string }[],
+  ctx: { weapon: boolean; minionCount: number; auras?: number },
+): BattlecryCard[] {
+  const out: BattlecryCard[] = [];
+  for (const card of hand) {
+    if (!card.cardId) continue;
+    // 费用只能来自实体(手牌被减费时卡表那个数是错的);拿不到就不猜
+    if (typeof card.cost !== 'number') continue;
+    /*
+     * 读到 0 费、牌面却不是 0 费 —— 那是实体还没 dump 完(`COST` 缺省 0),
+     * 不是真的免费。拿它进背包等于白送伤害,这里直接跳过。
+     */
+    if (card.cost === 0 && (cardCostOf(card.cardId) ?? 0) > 0) continue;
+    const fx = cardEffects(card.cardId);
+    if (fx.battlecry <= 0) continue;
+    if (battlecryState(fx, ctx) !== 'ready') continue;
+    const note = cardNote(card.cardId);
+    /*
+     * 「伤害3群」= 对敌方全体,确定打到脸;下面两类一律不算:
+     *   · 「伤害2群随机随从」—— 只能打随从
+     *   · 「伤害1随机」「伤害3群随机」—— 落点由随机决定,下界是 0 点
+     * 随机那条和一些老代码的取舍一致(见 damage.ts 开头的口径:群体、随机、多段一律不收)。
+     */
+    if (/随机/.test(note)) continue;
+    if (new RegExp(`伤害\\s*${fx.battlecry}[^\\s]*随从`).test(note)) continue;
+    out.push({
+      cardId: card.cardId,
+      name: card.name || cardName(card.cardId),
+      cost: Math.max(0, card.cost),
+      damage: fx.battlecry,
+    });
   }
   return out;
 }
@@ -241,10 +305,19 @@ export interface LethalPlan {
   spellDamage: number;
   /** buff 加的攻击力合计。 */
   buffDamage: number;
+  /**
+   * 手牌战吼能打到脸的伤害合计。
+   *
+   * 2026-11-19 补。原来这一项根本不存在,战吼只在 caveats 里写一句「没算进去」——
+   * 于是「8 费两张时间流具象、各 3 伤、对面 6 血」这种标准斩杀被算成「差 5」。
+   */
+  battlecryDamage: number;
   /** 总共能打到脸的伤害。 */
   total: number;
   spells: DamageCard[];
   buffs: BuffCard[];
+  /** 用到的战吼随从(逐张,同名两张各一条)。 */
+  battlecries: BattlecryCard[];
   /** 用掉了多少水晶。 */
   manaSpent: number;
   /** 用到的法术伤害加成。 */
@@ -285,6 +358,21 @@ export function planLethal(snapshot: GameSnapshot): LethalPlan {
   const canBuff = me.minions.some((m) => m.atk > 0 && m.canAttack);
   const buffs = canBuff ? buffsInHand(me.handCards ?? []) : [];
 
+  /*
+   * 战吼伤害(2026-11-19 补)。
+   *
+   * 和直伤、buff 抢同一份水晶 —— 一张 4 费战吼随从占的是 4 点预算,
+   * 不是白送的伤害,所以必须一起进背包,不能事后相加。
+   *
+   * 前提用 `auras: me.auras?.length` 传:没这一层信息时是 undefined,
+   * 判不了就是不进表(宁可说少),不会把「也许有」当成「有」。
+   */
+  const battlecries = battlecriesInHand(me.handCards ?? [], {
+    weapon: !!me.weapon,
+    minionCount: me.minions.length,
+    auras: me.auras?.length,
+  });
+
   // 硬币也是钱:手上有几个硬币,这一回合就多几点可花。
   // 不算它会把「5 水晶 + 硬币 + 火球」这种能斩杀的局面报成打不出来。
   // 硬币的净贡献,不是枚数 —— 被加费的硬币打出来换不到水晶(见 manaBudget)
@@ -293,6 +381,7 @@ export function planLethal(snapshot: GameSnapshot): LethalPlan {
   const items = [
     ...spells.map((s) => ({ kind: 'spell' as const, card: s, value: s.damage + spellPower, cost: Math.max(0, s.cost) })),
     ...buffs.map((b) => ({ kind: 'buff' as const, card: b, value: b.atk, cost: Math.max(0, b.cost) })),
+    ...battlecries.map((b) => ({ kind: 'battlecry' as const, card: b, value: b.damage, cost: Math.max(0, b.cost) })),
   ].filter((c) => c.cost <= budget);
 
   const cap = Math.max(0, Math.min(budget, 30));
@@ -309,20 +398,25 @@ export function planLethal(snapshot: GameSnapshot): LethalPlan {
   let manaSpent = 0;
   let spellDamage = 0;
   let buffDamage = 0;
+  let battlecryDamage = 0;
   const usedSpells: DamageCard[] = [];
   const usedBuffs: BuffCard[] = [];
+  const usedBattlecries: BattlecryCard[] = [];
   for (const pick of best.picks) {
     manaSpent += pick.cost;
     if (pick.kind === 'spell') {
       spellDamage += pick.value;
       usedSpells.push(pick.card);
+    } else if (pick.kind === 'battlecry') {
+      battlecryDamage += pick.value;
+      usedBattlecries.push(pick.card);
     } else {
       buffDamage += pick.value;
       usedBuffs.push(pick.card);
     }
   }
 
-  const total = faceAtk + spellDamage + buffDamage;
+  const total = faceAtk + spellDamage + buffDamage + battlecryDamage;
 
   const allBuffs = buffsInHand(me.handCards ?? []);
   const caveats: string[] = [];
@@ -331,7 +425,29 @@ export function planLethal(snapshot: GameSnapshot): LethalPlan {
   if (usedBuffs.length) caveats.push('buff 假设能加到能攻击的随从身上');
   if (spellPower > 0) caveats.push(`直伤已计入场上 +${spellPower} 法术伤害`);
   if (ignoreTaunt) caveats.push('我方有无视嘲讽的随从,过墙这一步按跳过算');
-  caveats.push('战吼伤害、光环、随从亡语都没算进去');
+  /*
+   * 战吼那句要跟着实情走（2026-11-19）。
+   *
+   * 原来固定写「战吼伤害…都没算进去」—— 现在确定打得出的已经进 total 了,
+   * 再这么写就是自相矛盾:上面那个数明明含战吼,下面又说没算。
+   *
+   * 剩下的两类仍要说清「没算」:条件不满足/判不了的战吼、随从亡语。
+   */
+  const pendingBattlecries = (me.handCards ?? []).filter((c) => {
+    const fx = cardEffects(c.cardId);
+    if (fx.battlecry <= 0) return false;
+    return !usedBattlecries.some((u) => u.cardId === c.cardId)
+      && battlecryState(fx, { weapon: !!me.weapon, minionCount: me.minions.length, auras: me.auras?.length }) !== 'ready';
+  });
+  if (usedBattlecries.length) {
+    caveats.push(`战吼已计入 ${battlecryDamage} 点(${usedBattlecries.map((b) => `${b.name} ${b.damage}`).join(' + ')})`);
+  }
+  if (pendingBattlecries.length) {
+    caveats.push('还有战吼因为前提不满足、或我判断不了前提,没算进上面那个数');
+  }
+  if (!usedBattlecries.length && !pendingBattlecries.length) {
+    caveats.push('战吼、随从亡语都没算进去');
+  }
   /*
    * **持续效果里会影响斩杀的那几张，逐一点名**（2026-11-14）。
    *
@@ -377,9 +493,11 @@ export function planLethal(snapshot: GameSnapshot): LethalPlan {
     faceAtk,
     spellDamage,
     buffDamage,
+    battlecryDamage,
     total,
     spells: usedSpells,
     buffs: usedBuffs,
+    battlecries: usedBattlecries,
     manaSpent,
     spellPower,
     caveats,

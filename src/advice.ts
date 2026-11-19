@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import type { GameSnapshot, MinionView, SideState } from './parser.ts';
 import { planLethal, heroSwing, lookupBuffCard, swingsOf, type LethalPlan } from './lethal.ts';
 import { damageSpellsInHand, lookupDamageCard } from './damage.ts';
-import { cardBody, cardEffects, cardNote, conditionalBattlecries, passiveOf, sureBattlecry } from './effects.ts';
+import { cardBody, cardEffects, cardNote, conditionalBattlecries, passiveOf } from './effects.ts';
 import type { FaceId } from './alerts.ts';
 
 /** 紧凑表里的条目:[名称, 费用, 类型字母, 摘要, 标签(含 f=可锻造 / p=可预备 / x=可交易), 职业, L=传说] */
@@ -1212,9 +1212,20 @@ export function advise(snapshot: GameSnapshot, opts: AdviceOptions = {}): Advice
   // 1. 能斩杀就先看斩杀
   if (lethal.total > 0 && lethal.total >= target) {
     const seq: string[] = [];
-    if (taunts.length) seq.push(...lethal.wall.steps);
+    /*
+     * 过墙步骤只在「随从真的要打脸」时才写进去（2026-11-19）。
+     *
+     * 战吼和直伤都不吃嘲讽,所以会出现「场攻全被墙吃掉(faceAtk = 0)、
+     * 斩杀完全靠法术或战吼」的局面 —— 这时候再写一条「几个随从合力解墙」,
+     * 读起来像「必须先解墙才能斩杀」,他会照着把 8 点攻击力白撞在墙上。
+     * 判据就是 faceAtk:它是 0,随从对这次斩杀没有贡献。
+     */
+    if (taunts.length && lethal.faceAtk > 0) seq.push(...lethal.wall.steps);
     for (const s of lethal.spells) seq.push(`打 ${s.name}(${s.cost}费 ${s.damage} 伤)`);
     for (const b of lethal.buffs) seq.push(`给随从贴 ${b.name}(${b.cost}费 +${b.atk}攻)`);
+    // 战吼步排在随从打脸之前:随从落地才能撞,而战吼是打出去就掉血。
+    // 顺序写反了他会先撞再用战吼,该省的那点攻击力就白撞在墙上了。
+    for (const b of lethal.battlecries) seq.push(`打 ${b.name}(${b.cost}费 战吼 ${b.damage} 伤打脸)`);
     if (lethal.faceAtk > 0) seq.push(`剩下的 ${lethal.faceAtk} 点攻击力打脸`);
     candidates.push(`可以斩杀:按 ${seq.join(' → ')} 的顺序走,合计 ${lethal.total} ≥ 对面 ${target}。`);
   }
@@ -1331,17 +1342,26 @@ export function advise(snapshot: GameSnapshot, opts: AdviceOptions = {}): Advice
   //    先出哪张取决于牌面效果和对手打法,那是她的判断,不是这张表能算的
   const playable = hand.filter((c) => c.playable);
 
-  // 手上的战吼伤害:打出去就能补,不占斩杀线,但在「差一点」的时候是关键一手。
+  // 手上的战吼伤害。
+  //
+  // 2026-11-19 改:以前这里只提「最大的一张」,还明说「不进斩杀线」——
+  // 于是一手两张时间流具象(各 3 伤)、对面 6 血的标准斩杀永远看不出来。
+  // 现在能确定打出的已经由 planLethal 逐张算进 total,这里只说清「哪几张、多少点」,
+  // 没斩杀的时候当补刀提示,斩杀了就是斩杀序列的一部分。
   //
   // 分两种报:
-  //   · 条件满足的 —— 直接说能打多少
+  //   · 前提满足的 —— 已进斩杀线,直接说能打多少
   //   · 条件不满足 / 判断不了的 —— 说清前提,别让他以为打出去就有伤害
   //     (雾帆劫掠者「战吼需装备武器」,没武器时它就是张 2/2 白板)
-  const me = { weapon: !!snapshot.me.weapon, minionCount: snapshot.me.minions.length };
-  const battlecry = sureBattlecry(playable.map((c) => c.cardId), me);
-  if (battlecry.damage > 0) {
-    const card = playable.find((c) => c.cardId === battlecry.cardId);
-    candidates.push(`手上 ${card?.name ?? battlecry.cardId} 的战吼能打 ${battlecry.damage} 点 —— 打出去就补上,不进斩杀线但能补刀。`);
+  const me = {
+    weapon: !!snapshot.me.weapon,
+    minionCount: snapshot.me.minions.length,
+    auras: snapshot.me.auras?.length,
+  };
+  if (lethal.battlecries.length) {
+    const totalBc = lethal.battlecries.reduce((n, b) => n + b.damage, 0);
+    const names = lethal.battlecries.map((b) => `${b.name}(${b.cost}费 ${b.damage} 伤)`).join('、');
+    candidates.push(`手上 ${names} 的战吼能打 ${totalBc} 点 —— 已经算进上面的斩杀线了。`);
   }
   for (const bc of conditionalBattlecries(playable.map((c) => c.cardId), me)) {
     const name = playable.find((c) => c.cardId === bc.cardId)?.name ?? bc.cardId;
@@ -1399,16 +1419,33 @@ function threatText(t: ThreatInfo): string {
 /** 把关照渲染成她能读的一段文字。 */
 export function renderAdvice(a: Advice, s: GameSnapshot): string {
   const lines: string[] = [];
-  const side = (x: SideState, who: string) => {
+  /*
+   * 两侧的「能不能攻击」不是一个口径，别混用（2026-11-19）。
+   *
+   * 我方看的是**这回合**：`canAttack` 为假（刚上、冻结、攻击过了）就该标出来，
+   * 因为这句话是给这一手用的。
+   *
+   * 对手看的是**下回合**：他刚铺下来的随从这一刻 `canAttack` 也是假，
+   * 可到了他自己的回合全能打。按 `canAttack` 标「不能攻击」，而场攻合计里
+   * 又把这几只的攻击力算进去了 —— 同一句话里两套口径，读的人会以为对面打不出来。
+   * 实测这一把就是这么显示的：「场攻 15(随从 15)」配「4 个都(不能攻击)」。
+   * 所以对手只标**永久**打不了的那种（`cantAttack`，如休眠、无法攻击）。
+   */
+  const mark = (m: SideState['minions'][number], enemy: boolean): string =>
+    enemy
+      ? (m.cantAttack ? '(打不了)' : '')
+      : (m.canAttack ? '' : '(不能攻击)');
+
+  const side = (x: SideState, who: string, enemy: boolean) => {
     const board = x.minions.length
-      ? x.minions.map((m) => `${minionLabel(m)} ${m.atk}/${m.health}${m.taunt ? '嘲讽' : ''}${m.divineShield ? '圣盾' : ''}${m.frozen ? '冻结' : ''}${m.canAttack ? '' : '(不能攻击)'}`).join('、')
+      ? x.minions.map((m) => `${minionLabel(m)} ${m.atk}/${m.health}${m.taunt ? '嘲讽' : ''}${m.divineShield ? '圣盾' : ''}${m.frozen ? '冻结' : ''}${mark(m, enemy)}`).join('、')
       : '空场';
     return `${who}:${x.heroClass || '职业未知'} ${x.health} 血${x.armor ? ` ${x.armor} 护甲` : ''} · 场面 ${board} · 手牌 ${Math.max(x.handCount, x.handCards?.length ?? 0)} 张 · 牌库 ${x.deckCount}`;
   };
 
   lines.push(`第 ${s.turn} 回合${s.isMyTurn ? '(轮到我)' : '(轮到对手)'} · 我的水晶 ${s.me.mana}/${s.me.manaMax}`);
-  lines.push(side(s.me, '我'));
-  lines.push(side(s.opponent, '对手'));
+  lines.push(side(s.me, '我', false));
+  lines.push(side(s.opponent, '对手', true));
 
   lines.push('', '【手牌】' + (a.hand.length ? '' : '(看不到,空)'));
   for (const c of a.hand) {
@@ -1465,6 +1502,7 @@ function lethalSummary(p: LethalPlan, s: GameSnapshot): string {
   bits.push(taunts.length ? `过墙后可打脸 ${p.faceAtk}` : `场攻 ${p.faceAtk}`);
   if (p.spellDamage) bits.push(`直伤 ${p.spellDamage}(${p.spells.map((x) => `${x.name} ${x.cost}费`).join('+')})`);
   if (p.buffDamage) bits.push(`buff ${p.buffDamage}(${p.buffs.map((x) => x.name).join('+')})`);
+  if (p.battlecryDamage) bits.push(`战吼 ${p.battlecryDamage}(${p.battlecries.map((x) => `${x.name} ${x.cost}费`).join('+')})`);
   const total = p.total;
   const verdict = total >= target && total > 0 ? `够斩杀(对面 ${target})` : total > 0 ? `差 ${target - total},对面 ${target}` : `打不到脸(对面 ${target})`;
   return `${bits.join(' + ')} = ${total} → ${verdict}`;
@@ -1536,6 +1574,9 @@ export function briefAdvice(snapshot: GameSnapshot, opts: AdviceOptions = {}): B
     }
     for (const s of a.lethal.spells) bits.push(`${s.name} ${s.damage} 伤`);
     for (const b of a.lethal.buffs) bits.push(`${b.name} +${b.atk} 攻`);
+    if (a.lethal.battlecryDamage) {
+      bits.push(`战吼 ${a.lethal.battlecries.map((b) => `${b.name} ${b.damage}`).join('+')}`);
+    }
     return {
       kind: 'lethal',
       face: 'excited',

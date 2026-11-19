@@ -275,6 +275,23 @@ export interface SideState {
   coinMana: number;
   deckCount: number;
   secrets: number;
+  /**
+   * 头上挂着的**光环**(圣骑士本版本的「持续 N 回合」法术)。
+   *
+   * 光环在日志里不进 PLAY 区,而是 `tag=ZONE value=SECRET` —— 跟奥秘同一个区。
+   * 所以 `secrets` 那个数里混着真奥秘和光环两种东西,只看数量分不出来。
+   *
+   * 为什么要单独挑出来:有的战吼写着「战吼需你控制着光环」(时间流具象),
+   * 判这条前提只有这一个依据。2026-11-19 实测:8 费手上两张时间流具象(各 3 伤),
+   * 对面 6 血,两条战吼正好斩杀 —— 而当时扩展把这条前提判成「判断不了」,
+   * 连伤害都没算进斩杀线。
+   *
+   * 存名字和 cardId 两样:名字用来给人读(「时序光环」),cardId 用来兜底。
+   *
+   * 可选:手造的快照(测试)可能没有这一层,那时按「判不了」处理 —— 不拿 `undefined`
+   * 当「肯定没有光环」,少说一句比说反一句便宜。
+   */
+  auras?: { cardId: string; name: string }[];
   minions: MinionView[];
   /**
    * 场上的武器。
@@ -1355,7 +1372,7 @@ export class PowerLogParser {
     return {
       playerId, isLocal, heroClass: '', heroName: '', heroCardId: '',
       health: 0, maxHealth: 0, armor: 0, heroAttack: 0, heroWindfury: false, fatigue: 0,
-      mana: 0, manaMax: 0, overload: 0, handCount: 0, handCards: [], coinCount: 0, coinMana: 0, deckCount: 0, secrets: 0,
+      mana: 0, manaMax: 0, overload: 0, handCount: 0, handCards: [], coinCount: 0, coinMana: 0, deckCount: 0, secrets: 0, auras: [],
       spellPower: 0,
       minions: [], weapon: null, playState: '', mulliganState: '',
     };
@@ -1374,6 +1391,7 @@ export class PowerLogParser {
     let spellPower = 0;
     let deckCount = 0;
     let secrets = 0;
+    const auras: { cardId: string; name: string }[] = [];
     let weapon: SideState['weapon'] = null;
 
     for (const e of this.entities.values()) {
@@ -1413,7 +1431,14 @@ export class PowerLogParser {
         continue;
       }
       if (zone === 'DECK') { deckCount += 1; continue; }
-      if (zone === 'SECRET') { secrets += 1; continue; }
+      if (zone === 'SECRET') {
+        secrets += 1;
+        // 光环和奥秘同一个区:名字里带「光环」的挑出来单独记。
+        // 名字取不到时退回卡表(起手摸到的实体常常只有 cardId)。
+        const name = e.name || cardName(e.cardId ?? '') || '';
+        if (/光环/.test(name)) auras.push({ cardId: e.cardId ?? '', name });
+        continue;
+      }
       if (zone !== 'PLAY') continue;
       const cardType = tag(e, 'CARDTYPE');
       if (cardType === 'MINION') {
@@ -1488,6 +1513,7 @@ export class PowerLogParser {
       spellPower,
       deckCount,
       secrets,
+      auras,
       minions,
       weapon,
       playState: this.playerTagValue(playerId, 'PLAYSTATE') ?? '',
