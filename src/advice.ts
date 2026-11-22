@@ -364,7 +364,7 @@ export function plainSpellNote(card: { type: string; note: string }): boolean {
   //
   // 但「不是 plain」不等于「任何时候都该排在随从前面」 —— 那个分寸在 `rank()` 里单独判，
   // 见「抽牌什么时候让位」那一段。两个问题分开处理，别用一个布尔值硬扛。
-  return !/伤害|抽|消灭|变形|嘲讽|圣盾|\+\d+\/\+\d+/.test(card.note);
+  return !/伤害|抽|消灭|变形|嘲讽|圣盾|属性值变为|\+\d+\/\+\d+/.test(card.note);
 }
 
 /**

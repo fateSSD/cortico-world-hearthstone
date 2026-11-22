@@ -420,3 +420,28 @@ test('P2-⑧ aoeCombos 共用变形牌判据识别「生而平等+奉献」，�
   const suicideCombos = aoeCombos(sSuicide);
   assert.equal(suicideCombos.length, 0, '3血放地狱烈焰自杀，aoeCombos 必须过滤掉');
 });
+
+test('空格修复的大地亡魂(BAR_750)可入 aoeOptions，且血帆袭击者+审判摘要含完整正文', () => {
+  const s = snap(
+    side({
+      heroClass: '萨满',
+      mana: 4,
+      handCards: [
+        { id: 1, cardId: 'BAR_750', cost: 4 },       // 大地亡魂：战吼 伤害1群随从
+        { id: 2, cardId: 'CORE_NEW1_018', cost: 2 }, // 血帆袭击者
+        { id: 3, cardId: 'JAIL_326', cost: 1 },      // 审判
+      ],
+    }),
+    side({
+      isLocal: false,
+      minions: [minion({ id: 11, name: '小兵', atk: 2, health: 1 })],
+    }),
+  );
+  const aoes = aoeOptions(s);
+  assert.ok(aoes.some((x) => x.name === '大地亡魂' && x.damage === 1), '大地亡魂应被识别为 1 伤战吼群伤');
+  const a = advise(s);
+  const raider = a.hand.find((c) => c.cardId === 'CORE_NEW1_018');
+  const judge = a.hand.find((c) => c.cardId === 'JAIL_326');
+  assert.match(raider?.note ?? '', /武器攻击力/);
+  assert.match(judge?.note ?? '', /属性值变为与该随从相同/);
+});

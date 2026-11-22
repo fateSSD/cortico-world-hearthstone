@@ -133,15 +133,16 @@ function formatDamageTag(text, max) {
 }
 
 /** 从牌面文字里提炼「这张牌干什么」的摘要。 */
-function effectNote(text, mechanics, type) {
+function effectNote(text, mechanics, type, attack = 0) {
   const bits = [];
 
   // 伤害:只报最大的那个数,并区分单体/敌方群体/敌我全打
-  // 数字前可能是 `$`(随法伤变化)或 `#`(随某个属性变化) —— 只兼容 `$` 会漏掉一整类牌,
-  // 真言术：耀 写的就是「恢复 #4点生命值」。
-  const damages = [...text.matchAll(/造成\s*[#$@]?\s*(\d+)\s*点伤害/g)].map((m) => Number(m[1]));
+  // 数字前可能是 `$`(随法伤变化)或 `#`(随某个属性变化),「点」和「伤害」间可能被换行拆出空格
+  const damages = [...text.matchAll(/造成\s*[#$@]?\s*(\d+)\s*点\s*伤害/g)].map((m) => Number(m[1]));
   if (damages.length) {
     bits.push(formatDamageTag(text, Math.max(...damages)));
+  } else if ((mechanics ?? []).includes('BATTLECRY') && attack > 0 && /战吼[^。]*造成等同于本随从攻击力的伤害/.test(text)) {
+    bits.push(formatDamageTag(text, attack));
   }
 
   // 抽牌
@@ -218,21 +219,27 @@ function effectNote(text, mechanics, type) {
   const limit = Math.max(6, mechBits.length);
   const tagged = [...mechBits, ...extra].slice(0, limit);
 
-  // 兜底:一个模式都没命中时,把原文压一压塞进去。
-  //
-  // 但**只给法术**。随从摘要的头是身材(`3/3`),那已经足够判断能不能换;硬拼一段
-  // 原文会变成「3/3 在你的回合结束时 如果本随从未攻击 &抽两张牌」这种噪音,
-  // 而它占的是「这回合打什么」里最贵的那点空间。
-  //
-  // 不加这层,2347 张可收集法术里 1395 张摘要是空的 —— 她看得见名字、看不见这张牌
-  // 干什么(变形术、策反、剽窃、迷乱、星界沟通全是这种)。
-  if (!tagged.length && type === 'SPELL') {
-    const plain = text
-      .replace(/[。，、；：「」（）()！？【】]/g, ' ')
-      .replace(/[#$@&]/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-    if (plain) return plain.slice(0, 28);
+  // 兜底:没提取出任何具体效果词时,把实质正文压短附上去。
+  //   · 法术(即便带 预备/双生法术/可交易 等机制词，如「审判」不能只剩「预备」)；
+  //   · 裸战吼随从(如「血帆袭击者」不能只剩「2/3 战吼」，丢失「获得等同于武器攻击力的攻击力」)。
+  if (!extra.length) {
+    if (type === 'SPELL') {
+      const plain = text
+        .replace(/^(?:预备|可交易|双生法术|压轴|锻造|腐蚀)[。，、：:\s]*/, '')
+        .replace(/[。，、；：「」（）()！？【】]/g, ' ')
+        .replace(/[#$@&]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (plain) return [...tagged, plain.slice(0, 28)].filter(Boolean).join(' ');
+    } else if (type === 'MINION' && (mechanics ?? []).includes('BATTLECRY')) {
+      const bcSeg = (text.split(/战吼[：:]/)[1] ?? '')
+        .split('。')[0]
+        .replace(/[，、；：「」（）()！？【】]/g, ' ')
+        .replace(/[#$@&]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (bcSeg) return [...tagged, bcSeg.slice(0, 24)].filter(Boolean).join(' ');
+    }
   }
 
   return tagged.join(' ');
@@ -311,15 +318,19 @@ function effectTags(card, text, mechanics) {
   // 战吼伤害:只看「战吼:」之后那一段,免得把光环伤害算进来
   if (mech.includes('BATTLECRY')) {
     const seg = text.split('战吼')[1] ?? '';
-    const m = /造成\s*[#$@]?\s*(\d+)\s*点伤害/.exec(seg);
+    const m = /造成\s*[#$@]?\s*(\d+)\s*点\s*伤害/.exec(seg);
     // 带前提的加问号:`b2?` 表示「最多 2 点,但要满足条件」。运行时不能当确定伤害用。
-    if (m) tags.push(`b${Number(m[1])}${battlecryCondition(text, mech) ? '?' : ''}`);
+    if (m) {
+      tags.push(`b${Number(m[1])}${battlecryCondition(text, mech) ? '?' : ''}`);
+    } else if ((card.attack ?? 0) > 0 && /造成等同于本随从攻击力的伤害/.test(seg)) {
+      tags.push(`b${Number(card.attack)}${battlecryCondition(text, mech) ? '?' : ''}`);
+    }
   }
 
   // 亡语伤害:同理,只看「亡语:」之后
   if (mech.includes('DEATHRATTLE')) {
     const seg = text.split('亡语')[1] ?? '';
-    const m = /造成\s*\$?\s*(\d+)\s*点伤害/.exec(seg);
+    const m = /造成\s*[#$@]?\s*(\d+)\s*点\s*伤害/.exec(seg);
     if (m) tags.push(`d${Number(m[1])}`);
   }
 
@@ -411,7 +422,7 @@ for (const c of cards) {
   // 条件战吼:前提必须写进摘要。只标 `b2?` 她看不懂问号是什么意思,
   // 写成「战吼需装备武器」她才知道没武器时这张牌是张 2/2 白板。
   const bcCond = battlecryCondition(text, c.mechanics);
-  let note = [effectNote(text, c.mechanics, c.type), bcCond ? `战吼需${bcCond}` : '']
+  let note = [effectNote(text, c.mechanics, c.type, c.attack ?? 0), bcCond ? `战吼需${bcCond}` : '']
     .filter(Boolean).join(' ');
 
   if (NOTE_PATCH[c.id]) {

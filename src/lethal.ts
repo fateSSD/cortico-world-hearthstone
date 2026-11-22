@@ -768,6 +768,68 @@ function collectPackItems(
   return out;
 }
 
+/**
+ * 检测「无穷攻武器（无穷之手）+ 吃武器攻战吼随从（血帆袭击者）+ 全场属性同步（审判）」联动 OTK。
+ *
+ * 2026-11-22 实战第 12 回合：圣骑士 6 费空场对 30 血牧师，手牌 无穷之手(3)+血帆袭击者(2)+审判(1)，
+ * 场上两只可攻击随从，旧逻辑把三张牌平铺在「按费打」里说「场上 4 点推脸 30→26」，漏掉直接斩杀。
+ */
+function detectInfSyncOtk(
+  me: SideState,
+  foe: SideState,
+  budget: number,
+  ignoreTaunt: boolean,
+): { cost: number; weaponName: string; weaponCost: number; minionName: string; minionCost: number; syncCardId: string; syncName: string; syncCost: number; tauntHits: number; readySwings: number } | null {
+  if (me.minions.length >= 7) return null;
+  const readySwings = me.minions.reduce((n, m) => n + (m.canAttack ? (m.windfury ? 2 : 1) : 0), 0);
+  if (readySwings <= 0) return null;
+
+  const tauntHits = ignoreTaunt
+    ? 0
+    : foe.minions
+      .filter((m) => m.taunt)
+      .reduce((n, m) => n + 1 + (m.divineShield ? 1 : 0) + (m.reborn ? 1 : 0), 0);
+  if (readySwings <= tauntHits) return null;
+
+  const hand = (me.handCards ?? []) as LethalHandCard[];
+  let wIdx = -1, wCost = 0;
+  let mIdx = -1, mCost = 0;
+  let sIdx = -1, sCost = 0;
+
+  for (let i = 0; i < hand.length; i += 1) {
+    const c = hand[i];
+    if (!c.cardId) continue;
+    const eff = handCardEffectiveCost(c);
+    if (eff === null) continue;
+    const note = cardNote(c.cardId);
+    const type = cardTypeOf(c.cardId);
+    if (wIdx < 0 && type === 'W' && /攻击力变为?无穷大/.test(note)) {
+      wIdx = i; wCost = eff;
+    } else if (mIdx < 0 && type === 'M' && /获得等同于你的武器攻击力的攻击力/.test(note)) {
+      mIdx = i; mCost = eff;
+    } else if (sIdx < 0 && type === 'S' && /将所有随从的属性值变为与该随从相同/.test(note)) {
+      sIdx = i; sCost = eff;
+    }
+  }
+  if (wIdx < 0 || mIdx < 0 || sIdx < 0) return null;
+  const cost = wCost + mCost + sCost;
+  if (cost > budget) return null;
+
+  const w = hand[wIdx], m = hand[mIdx], s = hand[sIdx];
+  return {
+    cost,
+    weaponName: w.name || cardName(w.cardId) || '无穷攻武器',
+    weaponCost: wCost,
+    minionName: m.name || cardName(m.cardId) || '吃武器攻随从',
+    minionCost: mCost,
+    syncCardId: s.cardId,
+    syncName: s.name || cardName(s.cardId) || '属性同步法术',
+    syncCost: sCost,
+    tauntHits,
+    readySwings,
+  };
+}
+
 /** 算这一回合的斩杀上限。 */
 export function planLethal(
   snapshot: GameSnapshot,
@@ -859,6 +921,43 @@ export function planLethal(
     }
   }
 
+  // 联动 OTK：无穷之手 + 血帆袭击者 + 审判（场上至少剩 1 次可过墙踢脸的随从攻击）
+  let infOtkNote = '';
+  if (total < target) {
+    const infOtk = detectInfSyncOtk(me, foe, budget, ignoreTaunt);
+    if (infOtk) {
+      const otkAtk = Math.max(target, 999);
+      faceAtk = 0;
+      total = otkAtk;
+      wall = {
+        cleared: true,
+        spent: 0,
+        leftover: 0,
+        steps: [
+          `先打${infOtk.weaponName}(${infOtk.weaponCost}费) → ${infOtk.minionName}(${infOtk.minionCost}费 战吼吃无穷武器攻) → ${infOtk.syncName}(${infOtk.syncCost}费 同步全场攻击力)${infOtk.tauntHits > 0 ? `，${infOtk.tauntHits} 次撞墙后` : '，'}场上可攻击随从直接踢脸`,
+        ],
+      };
+      chosen = {
+        manaSpent: infOtk.cost,
+        spellDamage: 0,
+        buffDamage: otkAtk,
+        battlecryDamage: 0,
+        chargeDamage: 0,
+        spells: [],
+        buffs: [{
+          cardId: infOtk.syncCardId,
+          name: `${infOtk.weaponName}→${infOtk.minionName}→${infOtk.syncName}(无穷攻联动)`,
+          cost: infOtk.cost,
+          atk: otkAtk,
+          health: 0,
+        }],
+        battlecries: [],
+        charges: [],
+      };
+      infOtkNote = `${infOtk.weaponName} + ${infOtk.minionName} + ${infOtk.syncName} 合计 ${infOtk.cost} 费，同步后场上 ${infOtk.readySwings} 次可攻击（过墙需 ${infOtk.tauntHits} 次），直接斩杀`;
+    }
+  }
+
   const {
     manaSpent, spellDamage, buffDamage, battlecryDamage, chargeDamage,
     spells: usedSpells, buffs: usedBuffs, battlecries: usedBattlecries, charges: usedCharges,
@@ -867,6 +966,7 @@ export function planLethal(
   const hand = (me.handCards ?? []) as LethalHandCard[];
   const allBuffs = buffsInHand(hand);
   const caveats: string[] = [];
+  if (infOtkNote) caveats.push(infOtkNote);
   if (taunts.length && !sweepTook) caveats.push('过墙按「用现有攻击力去解」算,没有考虑你先用法术解墙的情况');
   if (sweepTook && sweep) {
     const selfHeroNote = sweep.selfHeroDamage > 0 ? `（注意会伤己方英雄 ${sweep.selfHeroDamage} 血）` : '';

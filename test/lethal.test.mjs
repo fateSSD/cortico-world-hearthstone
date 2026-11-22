@@ -504,3 +504,54 @@ test('生而平等 + 地狱烈焰：我方只有 3 血时会把自己烧死，�
   const p = planLethal(s);
   assert.equal(p.viaClear, false);
 });
+
+/* ---------- 战吼漏网之鱼：无穷攻联动 OTK & 等同于本随从攻击力战吼 ---------- */
+
+test('2026-11-22 第 12 回合原局：无穷之手 + 血帆袭击者 + 审判 直接算进斩杀线', () => {
+  const mk = (foeMinions = [], myMinions = null, mana = 6) => snap(
+    side({
+      health: 25, mana, manaMax: mana,
+      minions: myMinions ?? [
+        minion({ id: 11, name: '血帆袭击者', atk: 2, health: 3, canAttack: true }),
+        minion({ id: 12, name: '奖品商贩', atk: 2, health: 3, canAttack: true }),
+      ],
+      handCards: [
+        { id: 64, cardId: 'END_012', cost: 3 },       // 无穷之手
+        { id: 55, cardId: 'CORE_NEW1_018', cost: 2 }, // 血帆袭击者
+        { id: 46, cardId: 'JAIL_326', cost: 1 },      // 审判（已预备减到 1 费）
+      ],
+    }),
+    side({ isLocal: false, health: 30, minions: foeMinions }),
+  );
+
+  // 空场 30 血 → 6 费直接斩杀
+  const p = planLethal(mk());
+  assert.ok(p.total >= 30, `6 费应直接算出来斩杀，实际 total=${p.total}`);
+  assert.equal(p.total, p.faceAtk + p.spellDamage + p.buffDamage + p.battlecryDamage + p.chargeDamage);
+  assert.match(p.wall.steps.join(' '), /无穷之手.*血帆袭击者.*审判/);
+
+  // 反例 1：对面两道嘲讽，我方只有 2 次可攻击（撞完墙没有剩余攻击踢脸）→ 不能报斩杀
+  const pBlocked = planLethal(mk([
+    minion({ id: 21, name: '墙A', atk: 2, health: 4, taunt: true }),
+    minion({ id: 22, name: '墙B', atk: 2, health: 4, taunt: true }),
+  ]));
+  assert.ok(pBlocked.total < 30, '2 次攻击全拿去撞墙，打不到脸不能报斩杀');
+
+  // 反例 2：场上没有能攻击的随从 → 不能报斩杀
+  const pNoSwing = planLethal(mk([], [minion({ id: 11, atk: 2, health: 3, canAttack: false })]));
+  assert.ok(pNoSwing.total < 30, '场上没能动的随从不能报斩杀');
+
+  // 反例 3：只有 5 费凑不齐 3+2+1=6 费 → 不能报斩杀
+  const pNoMana = planLethal(mk([], null, 5));
+  assert.ok(pNoMana.total < 30, '费用不够不能报斩杀');
+});
+
+test('战吼造成等同于本随从攻击力的伤害（乌鳞斥候 CATA_552）与空格修复（大地亡魂 BAR_750）', () => {
+  const s = snap(
+    side({ mana: 6, handCards: [{ id: 1, cardId: 'CATA_552', cost: 6 }] }),
+    side({ isLocal: false, health: 4 }),
+  );
+  const p = planLethal(s);
+  assert.equal(p.battlecryDamage, 4, '乌鳞斥候 4/4 战吼应计入 4 点伤害');
+  assert.equal(p.total, 4);
+});
