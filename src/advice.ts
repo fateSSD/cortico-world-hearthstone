@@ -12,11 +12,16 @@
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import type { GameSnapshot, MinionView, SideState } from './parser.ts';
+import type { DarkGiftInfo, GameSnapshot, MinionView, SideState } from './parser.ts';
 import { planLethal, heroSwing, lookupBuffCard, swingsOf, type LethalPlan } from './lethal.ts';
 import { damageSpellsInHand, lookupDamageCard } from './damage.ts';
-import { cardBody, cardEffects, cardNote, conditionalBattlecries, passiveOf } from './effects.ts';
+import {
+  battlecryState, cardBody, cardEffects, cardName, cardNote, cardTypeOf,
+  conditionalBattlecries, darkGiftEffects, LEVELER_NOTE_RE, passiveOf, resolveHandAoeCard,
+  type BattlecryContext,
+} from './effects.ts';
 import type { FaceId } from './alerts.ts';
+import type { TrackerSnapshot } from './tracker.ts';
 
 /** 紧凑表里的条目:[名称, 费用, 类型字母, 摘要, 标签(含 f=可锻造 / p=可预备 / x=可交易), 职业, L=传说] */
 type CardEntry = [string, number, string, string, string?, string?, string?];
@@ -163,21 +168,35 @@ function describeCard(cardId: string): { name: string; baseCost: number; type: s
  * 于是她自己算对了、第二个模型却照旧建议「打出去要弃两张牌」。
  * 状态标记只写在这里,三处就同时一致。
  */
-function handNote(cardId: string, prepared: boolean): string {
+function describeDarkGift(dg: DarkGiftInfo): string {
+  const fx = darkGiftEffects(dg.cardId, dg.note);
+  const parts: string[] = [];
+  if (fx.charge) parts.push('冲锋');
+  if (fx.doubleBattlecry) parts.push('双倍战吼');
+  if (fx.windfury) parts.push('风怒');
+  if (fx.divineShield) parts.push('圣盾');
+  if (fx.taunt) parts.push('嘲讽');
+  if (fx.lifesteal) parts.push('吸血');
+  if (fx.reborn) parts.push('复生');
+  if (fx.elusive) parts.push('扰魔');
+  if (fx.atkBonus !== 0 || fx.hpBonus !== 0) {
+    const a = fx.atkBonus >= 0 ? `+${fx.atkBonus}` : `${fx.atkBonus}`;
+    const h = fx.hpBonus >= 0 ? `+${fx.hpBonus}` : `${fx.hpBonus}`;
+    parts.push(`${a}/${h}`);
+  }
+  const detail = parts.length ? parts.join('·') : (dg.note || dg.name || '已强化');
+  return `〔黑暗之赐:${detail}〕`;
+}
+
+function handNote(cardId: string, prepared: boolean, darkGift?: DarkGiftInfo): string {
   const note = describeCard(cardId)?.note ?? '';
-  /*
-   * **把「甲10」摊开成「10 点护甲」**（2026-11-14）。
-   *
-   * 卡表摘要里护甲写成缩写「甲10」，结构化字段那边原来根本没有 armor 这一项
-   * （`effects.ts` 已补）。两处一缺一缩写，模型看到的就是一个读不懂的词 ——
-   * 实测报障：「打了一把战士，最后一回合她又迷惑了（我的法术效果）」，
-   * 那一局的手牌里有「放出鳄鱼」（甲10）、「清理污染」（甲3）。
-   */
   const plain = note.replace(/甲(\d+)/g, '$1 点护甲');
-  if (!prepared || !plain) return plain;
-  // 已预备:前面标状态,并去掉那个裸的「预备」词 ——
-  // 它已经预备过了,再留着会让人以为还能预备一次(每张牌只能预备一次)。
-  return `已预备,费用已减·${plain.replace(/(?:^|\s)预备(?=\s|$)/g, ' ').replace(/\s+/g, ' ').trim()}`;
+  const preparedText = !prepared || !plain
+    ? plain
+    : `已预备,费用已减·${plain.replace(/(?:^|\s)预备(?=\s|$)/g, ' ').replace(/\s+/g, ' ').trim()}`;
+  if (!darkGift) return preparedText;
+  const giftText = describeDarkGift(darkGift);
+  return preparedText ? `${preparedText} ${giftText}` : giftText;
 }
 
 /**
@@ -187,21 +206,16 @@ function handNote(cardId: string, prepared: boolean): string {
  */
 function pickDamageNote(picks: HandCardView[], snapshot: GameSnapshot): string {
   for (const c of picks) {
-    const pd = playDamage(c, snapshot.me.spellPower ?? 0);
+    const pd = playDamage(c, snapshot.me.spellPower ?? 0, { comboActive: snapshot.me.comboActive });
     if (!pd) continue;
     const name = c.name ?? c.cardId;
     if (!pd.ready) {
-      // 快枪没生效就明说别算它,省得他自己在场上数不明白
       if (pd.quickdraw) return `;${name}的快枪没生效(要本回合到手),那 ${pd.damage} 点别算进去`;
+      if (pd.combo) return `;${name}需要先出过一张牌触发连击,否则只有基础效果`;
       continue;
     }
     const foe = snapshot.opponent.minions;
-    // 这段伤害是**战吼**给的、还是挂在**快枪**上、还是牌本身就写着「伤害 N」——
-    // 三者不能混。原来只有两个分支(battlecry ? 战吼 : 快枪),于是任何既不是战吼
-    // 也不是快枪的牌都被叫成「快枪」。实测 2026-10-29 第 5 回合:
-    //   「它的快枪 1 点伤不到对面任何一只」—— 阳炎清算的卡面是「伤害1群随从」,
-    //   根本没有快枪。他会去找一张不存在的机制,而真正的信息是「这张牌打出去是白板」。
-    const src = pd.battlecry ? '战吼' : pd.quickdraw ? '快枪' : '';
+    const src = pd.battlecry ? '战吼' : pd.quickdraw ? '快枪' : pd.combo ? '连击' : '';
     const label = src ? `${name}的${src}` : name;
     const how = src ? `${label} ` : `${label}的 `;
     if (pd.minionOnly) {
@@ -211,21 +225,14 @@ function pickDamageNote(picks: HandCardView[], snapshot: GameSnapshot): string {
         const thinnest = Math.min(...foe.map((m) => m.health));
         return `;${how}${pd.damage} 点伤不到对面任何一只(最薄的也 ${thinnest} 血)`;
       }
-      // 挑血最少的那个说 —— 「能解掉」要配一个具体的名字,不然他不知道打谁
       const best = killable.reduce((a, b) => (a.health <= b.health ? a : b));
       return `;${how}${pd.damage} 点能解掉${minionLabel(best)}(${best.atk}/${best.health})`;
     }
-    // 能打脸的伤害:顺手能清掉一只就先把那只点出来 ——
-    // 「6 点直伤」听着像只能打脸,他未必想到可以先把 3/4 点掉。
     const killable = foe.filter((m) => m.health <= pd.damage);
     if (killable.length) {
       const best = killable.reduce((a, b) => (a.health <= b.health ? a : b));
-      return `;${name}的${src} ${pd.damage} 点能先点掉${minionLabel(best)}(${best.atk}/${best.health})`;
+      return `;${src ? `${name}的${src}` : name} ${pd.damage} 点能先点掉${minionLabel(best)}(${best.atk}/${best.health})`;
     }
-    // **群伤牌不是直伤牌。** 麦芽岩浆「伤害1群」打脸只有 1 点,可它的正事是清场 ——
-    // 劝他「顺带 1 点直伤」等于把一张清场牌当小火球扔了。
-    // 实测 2026-10-24 第 10 回合他当场反问:「麦芽我要留着清场,打一点血没意义啊」。
-    // 清不掉东西时它就一个字都不用提,留着他自己决定。
     if (/群/.test(c.note)) continue;
     return `;${name}打出去还能顺带 ${pd.damage} 点直伤`;
   }
@@ -305,6 +312,8 @@ export interface HandCardView {
   enteredTurn?: number;
   /** 快枪此刻生不生效(日志里的 POWERED_UP)。 */
   poweredUp?: boolean;
+  /** 附加的黑暗之赐效果（若有）。 */
+  darkGift?: DarkGiftInfo;
 }
 
 /**
@@ -407,26 +416,50 @@ export interface PlayDamage {
   quickdraw: boolean;
   /** 这段伤害是战吼给的(打了就生效),不是挂在快枪上。 */
   battlecry: boolean;
+  /** 连击给的伤害。 */
+  combo?: boolean;
   /** 这一手到底能不能炸出来。 */
   ready: boolean;
 }
 
-export function playDamage(card: HandCardView, spellPower = 0): PlayDamage | null {
+export function playDamage(
+  card: HandCardView,
+  spellPower = 0,
+  ctx?: { comboActive?: boolean; battlecry?: BattlecryContext },
+): PlayDamage | null {
   const m = /伤害\s*(\d+)/.exec(card.note);
   if (!m) return null;
-  // 场上法强要加进来:牌面「伤害2」,站着一个电击学徒就是 3 点 —— 够不够点掉那一只,
-  // 差别就在这 1 点。排序那类调用不传,按牌面算即可。
-  const damage = Number(m[1]) + spellPower;
-  // 「伤害2群随机随从」里的随从紧跟在伤害后面;「伤害6」后面什么都没有 = 能打脸
+  const fx = cardEffects(card.cardId);
+  const dg = card.darkGift ? darkGiftEffects(card.darkGift.cardId, card.darkGift.note) : null;
+  const isSpell = card.type === '法术';
+  const spBonus = isSpell ? spellPower : 0;
   const minionOnly = new RegExp(`伤害\\s*${m[1]}[^\\s]*随从`).test(card.note);
   const quickdraw = /快枪/.test(card.note);
   const battlecry = /战吼/.test(card.note);
-  // 「战吼需控机械」这种带前提的,我们不认卡面之外的状态,就别替它保证 ——
-  // 报一个打不出来的伤害,比不报更糟(实测迷你灭世者:没有机械还报「4 点能点掉」)。
-  if (/战吼需/.test(card.note)) return null;
-  // 战吼那部分打了就有;只有「快枪：造成 6 点伤害」这种(日斑巨龙),得看 POWERED_UP。
-  const ready = battlecry || !quickdraw || card.poweredUp === true;
-  return { damage, minionOnly, quickdraw, battlecry, ready };
+  const combo = !battlecry && fx.combo && fx.comboDamage > 0;
+
+  if (/战吼需/.test(card.note)) {
+    if (!ctx?.battlecry) return null;
+    if (battlecryState(fx, ctx.battlecry) !== 'ready') return null;
+  }
+
+  let baseDamage = Number(m[1]);
+  let ready = battlecry || !quickdraw || card.poweredUp === true;
+  if (combo) {
+    if (ctx?.comboActive) {
+      baseDamage = fx.comboDamage;
+      ready = true;
+    } else if (isSpell) {
+      const baseSpell = lookupDamageCard(card.cardId);
+      if (baseSpell) baseDamage = baseSpell.damage;
+      else ready = false;
+    } else {
+      ready = false;
+    }
+  }
+  if (battlecry && dg?.doubleBattlecry) baseDamage *= 2;
+
+  return { damage: baseDamage + spBonus, minionOnly, quickdraw, battlecry, ...(combo ? { combo: true } : {}), ready };
 }
 
 /**
@@ -500,7 +533,7 @@ export function readHand(side: SideState, keep: string[] = [], avoid: string[] =
       isCoin: isCoinId(card.cardId),
       baseCost: info?.baseCost ?? null,
       type: info?.type ?? '未知',
-      note: handNote(card.cardId, card.prepared === true),
+      note: handNote(card.cardId, card.prepared === true, card.darkGift),
       playable: card.cost <= budget,
       needsCoin: card.cost > side.mana && card.cost <= budget,
       keep: isKept(card.cardId, displayName, keep),
@@ -511,6 +544,7 @@ export function readHand(side: SideState, keep: string[] = [], avoid: string[] =
       tradeable: info?.tradeable ?? false,
       enteredTurn: card.enteredTurn,
       poweredUp: card.poweredUp === true,
+      ...(card.darkGift ? { darkGift: card.darkGift } : {}),
     });
   }
   // 能打出的排前面,同组里核心牌往后让、贵的在前(优先考虑把水晶用满)
@@ -603,20 +637,32 @@ export function tradeOptions(snapshot: GameSnapshot): TradeOption[] {
       const label = (x: MinionView) => minionLabel(x);
       const myStats = `${m.atk}/${m.health}${m.divineShield ? '圣盾' : ''}${m.windfury ? '风怒' : ''}${m.poisonous ? '剧毒' : ''}`;
       const itsStats = `${t.atk}/${t.health}${t.divineShield ? '圣盾' : ''}${t.taunt ? '嘲讽' : ''}${t.poisonous ? '剧毒' : ''}`;
+      /*
+       * 主语必须带随从名，不能只有身材（2026-11-20）。
+       *
+       * 原来这里直接拿 `myStats` 当句子开头，于是回合事件里出现
+       * 「先换:8/8 打 滑行者巨怪(6/7嘲讽) → 换掉它」——
+       * 场上有两只 8/8（灭世信徒、瓦尼尔士兵圣盾）时根本分不清推的是哪只；
+       * 更要命的是下游 `advicePick` 从「先换:」后面抓第一个 token，
+       * 抓到的是身材不是牌名，日记就记成「我说『8/8』，他打了『谦恭审判』」，
+       * 再被算进「推了他没听」的分歧统计。2026-11-20 那局第 17 回合就是这么记的，
+       * 历史上还有 4 处同型（「2/3」「2/1圣盾」「2/2」）。
+       */
+      const myLabel = `${label(m)}(${myStats})`;
 
       let text: string;
       const remain = Math.max(0, m.health - myLoss);
       const shieldNote = m.divineShield ? '(圣盾挡掉反击)' : '';
       if (killsReal && survives) {
-        text = `${myStats} 打 ${label(t)}(${itsStats}) → 换掉它,我的随从剩 ${remain} 血${shieldNote}`;
+        text = `${myLabel} 打 ${label(t)}(${itsStats}) → 换掉它,我的随从剩 ${remain} 血${shieldNote}`;
       } else if (killsReal) {
-        text = `${myStats} 打 ${label(t)}(${itsStats}) → 换掉它,但我的也死`;
+        text = `${myLabel} 打 ${label(t)}(${itsStats}) → 换掉它,但我的也死`;
       } else if (!killsReal && !survives) {
-        text = `${myStats} 打 ${label(t)}(${itsStats}) → 打不死还被反杀,别这么换`;
+        text = `${myLabel} 打 ${label(t)}(${itsStats}) → 打不死还被反杀,别这么换`;
       } else if (hadShield && dealt === 0) {
-        text = `${myStats} 打 ${label(t)}(${itsStats}) → 只破盾,它没掉血,我被咬 ${myLoss}`;
+        text = `${myLabel} 打 ${label(t)}(${itsStats}) → 只破盾,它没掉血,我被咬 ${myLoss}`;
       } else {
-        text = `${myStats} 打 ${label(t)}(${itsStats}) → 打掉 ${dealt} 血、它剩 ${Math.max(0, effectiveHp(t) - dealt)},我剩 ${remain} 血${shieldNote}`;
+        text = `${myLabel} 打 ${label(t)}(${itsStats}) → 打掉 ${dealt} 血、它剩 ${Math.max(0, effectiveHp(t) - dealt)},我剩 ${remain} 血${shieldNote}`;
       }
 
       // 这三个词条不改变血量计算,但改变「这一手划不划算」
@@ -967,6 +1013,16 @@ export interface AoeOption {
   heal: number;
   /** 只打随从,碰不到脸。 */
   minionsOnly: boolean;
+  /** 群伤是否会打到我方随从。 */
+  hitsOwnMinions: boolean;
+  /** 群伤是否会打到我方英雄。 */
+  hitsOwnHero: boolean;
+  /** 对我方英雄造成的确定自伤点数（0 = 无）。 */
+  selfHeroDamage: number;
+  /** 确定会被连带烧死的我方随从（非圣盾且血量 <= damage）。 */
+  ownLost: MinionView[];
+  /** 连带烧死的我方随从总攻击力。 */
+  ownLostAtk: number;
   text: string;
 }
 
@@ -998,59 +1054,72 @@ function spreadClears(minions: readonly MinionView[], damage: number): MinionVie
   return out;
 }
 
-/** 手里能打出的群体伤害,以及它能清掉什么。 */
-export function aoeOptions(snapshot: GameSnapshot): AoeOption[] {
+function makeBattlecryCtx(snapshot: GameSnapshot, deckHasDuplicates?: boolean): BattlecryContext {
+  return {
+    weapon: !!snapshot.me.weapon,
+    minionCount: snapshot.me.minions.length,
+    auras: snapshot.me.auras?.length,
+    imbueCount: snapshot.me.imbueCount,
+    hasDarkGiftInHand: (snapshot.me.handCards ?? []).some((c) => Boolean(c.darkGift)),
+    deckHasDuplicates,
+  };
+}
+
+/** 手里能打出的群体伤害（法术 + 前提满足的战吼随从），以及它能清掉什么、会否自伤。 */
+export function aoeOptions(snapshot: GameSnapshot, deckHasDuplicates?: boolean): AoeOption[] {
   const out: AoeOption[] = [];
   const foe = snapshot.opponent;
+  const ctx = makeBattlecryCtx(snapshot, deckHasDuplicates);
+  const sp = snapshot.me.spellPower ?? 0;
+  const boardSlotsFree = Math.max(0, 7 - snapshot.me.minions.length);
+  const myEffectiveHp = snapshot.me.health + snapshot.me.armor;
 
   for (const card of snapshot.me.handCards ?? []) {
     if (card.cost > snapshot.me.mana) continue;
     const entry = lookupCard(card.cardId);
-    if (!entry || entry[2] !== 'S') continue;
-    const m = /伤害(\d+)群/.exec(entry[3]);
-    if (!m) continue;
-    // 场上的法强要加进来:牌面写「伤害4群」,场上站着一个电击学徒(+1)就是 5 点。
-    // 这 1 点常常正是「差一只清不掉」和「全清」的分界 —— 实测 2026-10-24 第 9 回合,
-    // 她按牌面的 4 点算,没看出这回合能全清对面。
-    //
-    // **加进来的法强要标出来。** 2026-11-03 第 20 回合就是这样:系统按 1 点法强算出
-    // 群伤叠起来 9 点,她按牌面算 7 点,两边各报一个数,谁也说不清差在哪。
-    const sp = snapshot.me.spellPower ?? 0;
-    const damage = Number(m[1]) + sp;
-    // 两种群伤结构必须分开算,不能共用一个判据:
-    //   「伤害8群随机随从」—— 8 点**分配**到随机目标,总量就是 8;
-    //   「伤害4群随从」  —— 每个随从各吃 4 点,总量随数量涨。
-    const spreads = /随机/.test(entry[3]);
+    const name = entry?.[0] || card.name || '未知群伤牌';
+    const resolved = resolveHandAoeCard(card, { spellPower: sp, battlecryCtx: ctx, boardSlotsFree });
+    if (!resolved) continue;
+
+    const { damage, spreads, minionsOnly, hitsOwnMinions, hitsOwnHero, selfHeroDamage, lifesteal } = resolved;
+    const srcTag = resolved.kind === 'battlecry'
+      ? `·战吼${resolved.doubleBattlecry ? '×2' : ''}`
+      : (sp ? `(含法强 +${sp})` : '');
+
     const clears = spreads
       ? spreadClears(foe.minions, damage)
       : foe.minions.filter((x) => !x.divineShield && x.health <= damage);
     if (!clears.length) continue;
 
     const cutMax = clears.reduce((sum, x) => sum + (x.cantAttack ? 0 : x.atk), 0);
-    // 随机分配的**下界**:伤害落点不确定,最坏全砸在同一只身上。
-    // 只有「对面所有随从的血加起来都装得下这点伤害」时,才无论怎么随机都全清。
     const totalHealth = foe.minions.reduce((sum, x) => sum + Math.max(0, x.health), 0);
     const allGuaranteed = foe.minions.length > 0
       && foe.minions.every((x) => !x.divineShield)
       && totalHealth <= damage;
     const cutMin = spreads ? (allGuaranteed ? cutMax : 0) : cutMax;
 
-    // 吸血回血。只按**能清掉的**随从算(打不死的那些血量高,落点也不确定),
-    // 所以这是下界 —— 宁可少报,不能让他以为靠这张牌一定活得下来。
-    const lifesteal = cardEffects(card.cardId).lifesteal;
     const dealt = clears.reduce((sum, x) => sum + Math.min(damage, x.health), 0);
     const totalCap = spreads ? damage : damage * clears.length;
     const heal = lifesteal ? Math.min(totalCap, dealt) : 0;
 
-    // 「群随从」「群随机随从」碰不到脸;不带「随从」的才可能打到脸
-    const minionsOnly = /群(?:随机)?随从/.test(entry[3]);
+    const ownLost = !spreads && hitsOwnMinions
+      ? snapshot.me.minions.filter((x) => !x.divineShield && x.health <= damage)
+      : [];
+    const ownLostAtk = ownLost.reduce((sum, x) => sum + Math.max(0, x.atk), 0);
 
     const healNote = heal > 0 ? `,吸血回 ${heal} 血` : '';
+    const selfHeroNote = selfHeroDamage > 0
+      ? (selfHeroDamage >= myEffectiveHp ? `·会烧死自己!(伤己英雄${selfHeroDamage}血)` : `·伤己英雄${selfHeroDamage}血`)
+      : '';
+    const ownLossNote = ownLost.length
+      ? `,会连带烧死我方 ${ownLost.map((x) => `${minionLabel(x)} ${x.atk}/${x.health}`).join('、')}`
+      : (hitsOwnMinions && spreads ? ',也会随机打到我方随从' : '');
     const clearsNote = spreads
       ? `最多清掉 ${clears.map((x) => `${minionLabel(x)} ${x.atk}/${x.health}`).join('、')}(伤害随机分配,不保证)`
       : `能清掉 ${clears.map((x) => `${minionLabel(x)} ${x.atk}/${x.health}`).join('、')}`;
+
     out.push({
-      name: entry[0],
+      name,
       cost: card.cost,
       damage,
       clears,
@@ -1059,34 +1128,62 @@ export function aoeOptions(snapshot: GameSnapshot): AoeOption[] {
       cutMin,
       heal,
       minionsOnly,
-      text: `${entry[0]}(${card.cost}费 ${damage} 伤群体${sp ? `(含法强 +${sp})` : ''}${spreads ? '·随机分配' : ''}${minionsOnly ? '·只打随从' : ''}${healNote})${clearsNote}`,
+      hitsOwnMinions,
+      hitsOwnHero,
+      selfHeroDamage,
+      ownLost,
+      ownLostAtk,
+      text: `${name}(${card.cost}费 ${damage} 伤群体${srcTag}${spreads ? '·随机分配' : ''}${minionsOnly ? '·只打随从' : ''}${selfHeroNote}${healNote})${clearsNote}${ownLossNote}`,
     });
   }
-  // 确定能清场的排前面 —— 随机分配的那张不该抢「这就是解」的位置
-  return out.sort((a, b) => b.cutMin - a.cutMin || b.clears.length - a.clears.length || a.cost - b.cost);
+  return out.sort((a, b) =>
+    (Number(a.selfHeroDamage >= myEffectiveHp) - Number(b.selfHeroDamage >= myEffectiveHp))
+    || b.cutMin - a.cutMin
+    || b.clears.length - a.clears.length
+    || (a.selfHeroDamage + a.ownLostAtk) - (b.selfHeroDamage + b.ownLostAtk)
+    || a.cost - b.cost,
+  );
 }
 
 /** 手里一张群伤牌的原始数据(组合用,不做「能不能清掉」的过滤)。 */
-interface HandAoe { name: string; cost: number; damage: number; spreads: boolean; }
+interface HandAoe {
+  handIndex: number;
+  name: string;
+  cost: number;
+  damage: number;
+  spreads: boolean;
+  isMinion: boolean;
+  hitsOwnMinions: boolean;
+  selfHeroDamage: number;
+}
 
-function handAoe(snapshot: GameSnapshot): HandAoe[] {
+function handAoe(snapshot: GameSnapshot, deckHasDuplicates?: boolean): HandAoe[] {
   const out: HandAoe[] = [];
   const seen = new Set<string>();
-  for (const card of snapshot.me.handCards ?? []) {
-    const entry = lookupCard(card.cardId);
-    if (!entry || entry[2] !== 'S') continue;
-    const m = /伤害(\d+)群/.exec(entry[3]);
-    if (!m) continue;
-    // 同一张牌在手上可能是两个实体(两张阳炎清算),按 name+cost 去重会把它们并成一张,
-    // 叠伤害就少算一份 —— 这里只按**实体**去重,同名牌出现几次就记几次。
+  const ctx = makeBattlecryCtx(snapshot, deckHasDuplicates);
+  const sp = snapshot.me.spellPower ?? 0;
+  const boardSlotsFree = Math.max(0, 7 - snapshot.me.minions.length);
+  const hand = snapshot.me.handCards ?? [];
+
+  for (let i = 0; i < hand.length; i += 1) {
+    const card = hand[i];
+    const resolved = resolveHandAoeCard(card, { spellPower: sp, battlecryCtx: ctx, boardSlotsFree });
+    if (!resolved) continue;
+
     const key = `${card.id ?? ''}|${card.cardId}`;
     if (card.id !== undefined && seen.has(key)) continue;
     seen.add(key);
+
+    const entry = lookupCard(card.cardId);
     out.push({
-      name: entry[0],
+      handIndex: i,
+      name: entry?.[0] || card.name || '未知群伤牌',
       cost: card.cost,
-      damage: Number(m[1]) + (snapshot.me.spellPower ?? 0),
-      spreads: /随机/.test(entry[3]),
+      damage: resolved.damage,
+      spreads: resolved.spreads,
+      isMinion: resolved.kind === 'battlecry',
+      hitsOwnMinions: resolved.hitsOwnMinions,
+      selfHeroDamage: resolved.selfHeroDamage,
     });
   }
   return out;
@@ -1100,54 +1197,47 @@ export interface AoeCombo {
   /** 清掉的随从攻击力合计 —— 也就是「这么打能砍掉多少场攻」。 */
   cut: number;
   cleared: number;
+  /** 对己方英雄造成的合计自伤（0 = 无）。 */
+  selfHeroDamage: number;
   /** 这组用了哪几张牌(牌名,同名牌重复出现)。用来判断「是不是已经在按费打里推过了」。 */
   names: string[];
   /** 这组清掉的随从里**含嘲讽** —— 也就是「这组能过墙」。 */
   clearsTaunt: boolean;
 }
 
-/**
- * 手上**几张群伤叠起来**能清掉什么。
- *
- * 单张算不出来的时候,叠加往往才是真正的解。2026-11-03 第 20 回合:对面 5 个随从
- * (3 面嘲讽、场攻 29),我 20 血。系统只给了「别指望挡,直接抢脸」—— 而手上
- * 奉献 + 棱彩光束 + 两张阳炎清算叠起来 7 点、9 费,正好把 5/7、5/5、5/7 清干净。
- * 那是她自己临时调工具、手算出来的,系统一个字没提。
- *
- * 三条边界:
- *   · 随机分配(`伤害N群随机`)不参与 —— 它的下界是 0,不能拿上界当「能清」;
- *   · 圣盾随从不算 —— 伤害要多吃一下才破盾,这种账算不清就不算;
- *   · 子集全枚举但**受费用剪枝**。手牌里的群伤一般不超过 5 张(2⁵ = 31 组),
- *     枚举得起 —— 反倒是「只算两张」会漏掉这局真正的解:
- *     奉献 2 + 棱彩光束 3 + 两张阳炎清算 1+1 才凑到 7 点,够清 5/7 那两只。
- */
-export function aoeCombos(snapshot: GameSnapshot): AoeCombo[] {
-  const pool = handAoe(snapshot).filter((c) => !c.spreads);
+export function aoeCombos(snapshot: GameSnapshot, deckHasDuplicates?: boolean): AoeCombo[] {
+  const pool = handAoe(snapshot, deckHasDuplicates).filter((c) => !c.spreads);
   if (!pool.length) return [];
   const budget = manaBudget(snapshot.me);
   const foe = snapshot.opponent.minions.filter((m) => !m.divineShield && m.health > 0);
   if (!foe.length) return [];
+  const freeSlots = Math.max(0, 7 - snapshot.me.minions.length);
+  const myEffectiveHp = snapshot.me.health + snapshot.me.armor;
 
   const out: AoeCombo[] = [];
-  // 法强要标出来:同样的牌,场上有没有那个 +1 就是「清得掉」和「清不掉」的差别,
-  // 不标的话她按牌面重算一遍,两个数就对不上(2026-11-03 第 20 回合:系统 9、她 7)。
   const sp = snapshot.me.spellPower ?? 0;
   const spNote = sp ? `(含法强 +${sp})` : '';
-  // 2^n 个子集,按费用剪枝。手牌群伤很少超过 5 张,这里不设上限也跑得完。
   const combos: HandAoe[][] = [];
   for (let mask = 1; mask < 1 << pool.length; mask += 1) {
     const combo: HandAoe[] = [];
     for (let i = 0; i < pool.length; i += 1) if (mask & (1 << i)) combo.push(pool[i]);
     if (combo.reduce((n, c) => n + c.cost, 0) > budget) continue;
+    if (combo.filter((c) => c.isMinion).length > freeSlots) continue;
     combos.push(combo);
   }
   for (const combo of combos) {
     const cost = combo.reduce((n, c) => n + c.cost, 0);
     const damage = combo.reduce((n, c) => n + c.damage, 0);
+    const selfHeroDamage = combo.reduce((n, c) => n + c.selfHeroDamage, 0);
+    if (selfHeroDamage >= myEffectiveHp && selfHeroDamage > 0) continue;
+
     const cleared = foe.filter((m) => damage >= m.health);
     if (!cleared.length) continue;
     const cut = cleared.reduce((n, m) => n + m.atk, 0);
-    // 同名牌合并成「阳炎清算 ×2」—— 四张牌全名连排会把这句撑到读不过来
+    const hitsOwn = combo.some((c) => c.hitsOwnMinions);
+    const ownLostCount = hitsOwn
+      ? snapshot.me.minions.filter((m) => !m.divineShield && m.health <= damage).length
+      : 0;
     const tally = new Map<string, { n: number; cost: number; damage: number }>();
     for (const c of combo) {
       const t = tally.get(c.name) ?? { n: 0, cost: 0, damage: 0 };
@@ -1156,18 +1246,246 @@ export function aoeCombos(snapshot: GameSnapshot): AoeCombo[] {
     const names = [...tally.entries()]
       .map(([name, t]) => `${name}${t.n > 1 ? ` ×${t.n}` : ''}`)
       .join(' + ');
+    const selfWarn = [
+      selfHeroDamage > 0 ? `自伤 ${selfHeroDamage} 血` : '',
+      ownLostCount > 0 ? `连带烧死我方 ${ownLostCount} 只` : '',
+    ].filter(Boolean).join('、');
     out.push({
-      text: `${names} = ${damage} 点${spNote}、${cost} 费,能清掉 ${cleared.map(minionLabel).join('、')}(砍掉 ${cut} 点场攻)`,
+      text: `${names} = ${damage} 点${spNote}、${cost} 费${selfWarn ? `(${selfWarn})` : ''},能清掉 ${cleared.map(minionLabel).join('、')}(砍掉 ${cut} 点场攻)`,
       cost,
       damage,
       cut,
       cleared: cleared.length,
+      selfHeroDamage,
       names: combo.map((c) => c.name),
       clearsTaunt: cleared.some((m) => m.taunt),
     });
   }
-  // 砍掉的场攻最多优先;一样多时挑便宜的那组 —— 省下的水还能做别的
-  return out.sort((a, b) => b.cut - a.cut || b.cleared - a.cleared || a.cost - b.cost);
+
+  // 共用 LEVELER_NOTE_RE：把手上的「全场变 1 血 + 单张群伤」也纳入清场组合判据
+  const hasShieldOrReborn = snapshot.opponent.minions.some((m) => m.divineShield || m.reborn);
+  const hand = snapshot.me.handCards ?? [];
+  if (!hasShieldOrReborn) {
+    for (let li = 0; li < hand.length; li += 1) {
+      const lc = hand[li];
+      if (!lc.cardId || !LEVELER_NOTE_RE.test(cardNote(lc.cardId))) continue;
+      const lName = lc.name || cardName(lc.cardId) || '变形牌';
+      for (const aoeCard of pool) {
+        if (aoeCard.handIndex === li) continue;
+        const cost = lc.cost + aoeCard.cost;
+        if (cost > budget) continue;
+        if (aoeCard.isMinion && freeSlots <= 0) continue;
+        if (aoeCard.selfHeroDamage >= myEffectiveHp && aoeCard.selfHeroDamage > 0) continue;
+        const cut = foe.reduce((n, m) => n + m.atk, 0);
+        const ownLostCount = aoeCard.hitsOwnMinions
+          ? snapshot.me.minions.filter((m) => !m.divineShield).length
+          : 0;
+        const selfWarn = [
+          aoeCard.selfHeroDamage > 0 ? `自伤 ${aoeCard.selfHeroDamage} 血` : '',
+          ownLostCount > 0 ? `连带烧死我方 ${ownLostCount} 只` : '',
+        ].filter(Boolean).join('、');
+        out.push({
+          text: `${lName} + ${aoeCard.name}(全场变 1 血再扫 ${aoeCard.damage} 点)、${cost} 费${selfWarn ? `(${selfWarn})` : ''},能清掉 ${foe.map(minionLabel).join('、')}(砍掉 ${cut} 点场攻)`,
+          cost,
+          damage: aoeCard.damage,
+          cut,
+          cleared: foe.length,
+          selfHeroDamage: aoeCard.selfHeroDamage,
+          names: [lName, aoeCard.name],
+          clearsTaunt: foe.some((m) => m.taunt),
+        });
+      }
+      break;
+    }
+  }
+
+  return out.sort((a, b) =>
+    b.cut - a.cut
+    || b.cleared - a.cleared
+    || a.selfHeroDamage - b.selfHeroDamage
+    || a.cost - b.cost,
+  );
+}
+
+export interface SingleRemoval {
+  name: string;
+  cardId: string;
+  cost: number;
+  kind: 'spell' | 'battlecry' | 'combo' | 'destroy' | 'transform' | 'silence' | 'freeze' | 'rush' | 'heal';
+  target: MinionView | null;
+  cutSafe: number;
+  heal: number;
+  text: string;
+}
+
+const foeAtkContribution = (m: MinionView): number =>
+  (m.cantAttack || m.frozen || m.atk <= 0) ? 0 : m.atk * (m.windfury ? 2 : 1);
+
+/**
+ * 扫描当前费内（不含硬币）可出的单解、控场与保命牌。
+ *
+ * 保守边界：跳过已归入 `aoeOptions` 的群伤牌，跳过随机落点，跳过带未确认前提的牌；
+ * 消灭复生怪不计保底减攻，只给确定降低的下回合场攻或确定回复的血/甲。
+ */
+export function singleRemovals(snapshot: GameSnapshot, deckHasDuplicates?: boolean): SingleRemoval[] {
+  const out: SingleRemoval[] = [];
+  const foe = snapshot.opponent.minions;
+  const ctx = makeBattlecryCtx(snapshot, deckHasDuplicates);
+  const sp = snapshot.me.spellPower ?? 0;
+  const comboActive = Boolean(snapshot.me.comboActive);
+  const freeSlots = Math.max(0, 7 - snapshot.me.minions.length);
+
+  for (const card of snapshot.me.handCards ?? []) {
+    if (!card.cardId || card.cost > snapshot.me.mana) continue;
+    if (isCoinId(card.cardId)) continue;
+    const fx = cardEffects(card.cardId);
+    // 群伤牌由 aoeOptions 负责，不重复计一次
+    if (fx.aoeDamage > 0) continue;
+
+    const note = cardNote(card.cardId);
+    if (/随机/.test(note)) continue;
+
+    const type = cardTypeOf(card.cardId);
+    const isMinion = type === 'M';
+    if (isMinion && freeSlots <= 0) continue;
+    if (fx.battlecryConditional && battlecryState(fx, ctx) !== 'ready') continue;
+
+    const info = describeCard(card.cardId);
+    const forged = info?.forged ?? false;
+    if (!forged && COSTLY_NOTE.test(note)) continue;
+
+    const dg = card.darkGift ? darkGiftEffects(card.darkGift.cardId, card.darkGift.note) : null;
+    const name = card.name || cardName(card.cardId) || '未知卡牌';
+    const baseSustain = (fx.armor || 0) + (/奶\s*\d+[^\s]*随从/.test(note) ? 0 : fx.heal || 0);
+
+    let bestRemoval: SingleRemoval | null = null;
+    const consider = (cand: SingleRemoval) => {
+      if (!bestRemoval || (cand.cutSafe + cand.heal) > (bestRemoval.cutSafe + bestRemoval.heal)) {
+        bestRemoval = cand;
+      }
+    };
+
+    // 1) 变形单解（连复生/亡语一起变掉，确定削攻）
+    if (fx.transform && !/所有/.test(note) && foe.length) {
+      const target = [...foe].sort((a, b) => foeAtkContribution(b) - foeAtkContribution(a) || b.health - a.health)[0];
+      if (target) {
+        const cut = foeAtkContribution(target);
+        consider({
+          name, cardId: card.cardId, cost: card.cost, kind: 'transform', target,
+          cutSafe: cut, heal: baseSustain,
+          text: `${name}(${card.cost}费) 变形 ${minionLabel(target)}(${target.atk}/${target.health})${cut ? `,削掉 ${cut} 点场攻` : ''}`,
+        });
+      }
+    }
+
+    // 2) 消灭单解（过滤掉「所有」「牌/法力值」等非干净条件；「受伤」限定受伤随从）
+    if (fx.destroy && !/所有/.test(note) && !/攻击力|生命值|法力值|武器/.test(note) && foe.length) {
+      const injuredOnly = /受伤/.test(note);
+      const pool = foe.filter((m) => !injuredOnly || m.health < m.maxHealth);
+      const target = [...pool].sort((a, b) => foeAtkContribution(b) - foeAtkContribution(a) || b.health - a.health)[0];
+      if (target) {
+        const cut = target.reborn ? 0 : foeAtkContribution(target);
+        consider({
+          name, cardId: card.cardId, cost: card.cost, kind: 'destroy', target,
+          cutSafe: cut, heal: baseSustain,
+          text: `${name}(${card.cost}费) 消灭 ${minionLabel(target)}(${target.atk}/${target.health})${cut ? `,削掉 ${cut} 点场攻` : target.reborn ? '(对方复生仍留 1 血)' : ''}`,
+        });
+      }
+    }
+
+    // 3) 冻结控制（冰环全体冻结或单冻最高威胁）
+    if (fx.freeze && (type === 'S' || (isMinion && fx.battlecry > 0) || /冻结/.test(note))) {
+      const freezePool = foe.filter((m) => !m.cantAttack && !m.frozen && m.atk > 0);
+      if (/所有/.test(note) && /敌方/.test(note) && freezePool.length) {
+        const cut = freezePool.reduce((sum, m) => sum + foeAtkContribution(m), 0);
+        consider({
+          name, cardId: card.cardId, cost: card.cost, kind: 'freeze', target: freezePool[0],
+          cutSafe: cut, heal: baseSustain,
+          text: `${name}(${card.cost}费) 冻结敌方全体随从,下回合少挨 ${cut} 点`,
+        });
+      } else if (!/所有/.test(note) && freezePool.length) {
+        const target = [...freezePool].sort((a, b) => foeAtkContribution(b) - foeAtkContribution(a))[0];
+        const cut = foeAtkContribution(target);
+        consider({
+          name, cardId: card.cardId, cost: card.cost, kind: 'freeze', target,
+          cutSafe: cut, heal: baseSustain,
+          text: `${name}(${card.cost}费) 冻结 ${minionLabel(target)}(${target.atk}/${target.health}),下回合少挨 ${cut} 点`,
+        });
+      }
+    }
+
+    // 4) 单伤点杀（法术 / 战吼 / 已激活连击）
+    let singleDmg = 0;
+    let dmgKind: SingleRemoval['kind'] = 'spell';
+    if (type === 'S') {
+      const dCard = lookupDamageCard(card.cardId);
+      let base = dCard?.damage ?? 0;
+      if (!base) {
+        const dm = /伤害\s*(\d+)/.exec(note);
+        if (dm && !/自己|友方/.test(note)) base = Number(dm[1]) || 0;
+      }
+      if (comboActive && fx.combo && fx.comboDamage > 0) base = Math.max(base, fx.comboDamage);
+      if (base > 0) singleDmg = base + sp;
+    } else if (isMinion) {
+      if (fx.battlecry > 0) {
+        singleDmg = fx.battlecry * (dg?.doubleBattlecry ? 2 : 1);
+        dmgKind = 'battlecry';
+      } else if (comboActive && fx.combo && fx.comboDamage > 0) {
+        singleDmg = fx.comboDamage;
+        dmgKind = 'combo';
+      }
+    }
+    if (singleDmg > 0 && foe.length) {
+      const killable = foe
+        .filter((m) => !m.divineShield && m.health <= singleDmg)
+        .sort((a, b) => foeAtkContribution(b) - foeAtkContribution(a) || b.health - a.health);
+      const target = killable[0] ?? null;
+      if (target) {
+        const cut = target.reborn ? 0 : foeAtkContribution(target);
+        const lsHeal = fx.lifesteal ? Math.min(singleDmg, target.health) : 0;
+        consider({
+          name, cardId: card.cardId, cost: card.cost, kind: dmgKind, target,
+          cutSafe: cut, heal: Math.max(baseSustain, lsHeal),
+          text: `${name}(${card.cost}费 ${singleDmg} 伤) 点掉 ${minionLabel(target)}(${target.atk}/${target.health})${cut ? `,削 ${cut} 场攻` : ''}`,
+        });
+      }
+    }
+
+    // 5) 突袭 / 冲锋随从当回合解场
+    if (isMinion && (/突袭/.test(note) || /冲锋/.test(note) || !!dg?.charge) && foe.length) {
+      const body = cardBody(card.cardId);
+      const atk = (body?.atk ?? 0) + (dg?.atkBonus ?? 0) + (comboActive && fx.combo ? fx.comboBuffAtk : 0);
+      if (atk > 0) {
+        const poisonous = /剧毒/.test(note);
+        const killable = foe
+          .filter((m) => !m.divineShield && (poisonous || atk >= m.health))
+          .sort((a, b) => foeAtkContribution(b) - foeAtkContribution(a));
+        const target = killable[0] ?? null;
+        if (target) {
+          const cut = target.reborn ? 0 : foeAtkContribution(target);
+          const lsHeal = (fx.lifesteal || dg?.lifesteal) ? Math.min(atk, target.health) : 0;
+          consider({
+            name, cardId: card.cardId, cost: card.cost, kind: 'rush', target,
+            cutSafe: cut, heal: Math.max(baseSustain, lsHeal),
+            text: `${name}(${card.cost}费 ${atk}攻${poisonous ? '剧毒' : '突袭'}) 撞掉 ${minionLabel(target)}(${target.atk}/${target.health})${cut ? `,削 ${cut} 场攻` : ''}`,
+          });
+        }
+      }
+    }
+
+    // 6) 纯回血 / 叠甲保命（仅当无更好解场选项时，且至少回 3 点才值回票价）
+    if (!bestRemoval && baseSustain >= 3) {
+      consider({
+        name, cardId: card.cardId, cost: card.cost, kind: 'heal', target: null,
+        cutSafe: 0, heal: baseSustain,
+        text: `${name}(${card.cost}费) 补回 ${baseSustain} 点有效血量`,
+      });
+    }
+
+    if (bestRemoval) out.push(bestRemoval);
+  }
+
+  return out.sort((a, b) => (b.cutSafe + b.heal) - (a.cutSafe + a.heal) || a.cost - b.cost);
 }
 
 /** 算建议时需要的外部知识(配置)。全可选,不传就是纯机械规则。 */
@@ -1176,11 +1494,12 @@ export interface AdviceOptions {
   keepCards?: string | string[];
   /**
    * 这回合要避开的牌名 —— 上一张连推了两次、他没打的。
-   *
-   * 排序时把命中这些名字的牌排到同组最后（`readHand`），不是剔除：
-   * 手牌里只剩它能打的时候照样推它，否则等于什么都不建议。
    */
   avoid?: string[];
+  /** 记牌器快照（由 world 注入，用于反哺宇宙判断、余牌概率与对手已交 key 牌）。 */
+  tracker?: TrackerSnapshot | null;
+  /** 对手主流卡组匹配摘要文本（由 world 注入）。 */
+  matchupHint?: string;
 }
 
 export interface Advice {
@@ -1191,6 +1510,7 @@ export interface Advice {
   combined: CombinedTrade[];
   threat: ThreatInfo;
   aoe: AoeOption[];
+  singleRemovals: SingleRemoval[];
   /** 按固定规则排出的候选,不是结论。 */
   candidates: string[];
 }
@@ -1198,12 +1518,14 @@ export interface Advice {
 /** 算这一回合的全部可用信息。 */
 export function advise(snapshot: GameSnapshot, opts: AdviceOptions = {}): Advice {
   const keep = parseKeepCards(opts.keepCards);
-  const lethal = planLethal(snapshot);
+  const deckHasDup = opts.tracker?.me.hasDuplicates;
+  const lethal = planLethal(snapshot, { deckHasDuplicates: deckHasDup });
   const hand = readHand(snapshot.me, keep, opts.avoid ?? []);
   const trades = tradeOptions(snapshot);
   const combined = combinedTrades(snapshot);
   const threat = threatInfo(snapshot);
-  const aoe = aoeOptions(snapshot);
+  const aoe = aoeOptions(snapshot, deckHasDup);
+  const removals = singleRemovals(snapshot, deckHasDup);
   const target = snapshot.opponent.health + snapshot.opponent.armor;
   const taunts = snapshot.opponent.minions.filter((m) => m.taunt);
 
@@ -1212,38 +1534,24 @@ export function advise(snapshot: GameSnapshot, opts: AdviceOptions = {}): Advice
   // 1. 能斩杀就先看斩杀
   if (lethal.total > 0 && lethal.total >= target) {
     const seq: string[] = [];
-    /*
-     * 过墙步骤只在「随从真的要打脸」时才写进去（2026-11-19）。
-     *
-     * 战吼和直伤都不吃嘲讽,所以会出现「场攻全被墙吃掉(faceAtk = 0)、
-     * 斩杀完全靠法术或战吼」的局面 —— 这时候再写一条「几个随从合力解墙」,
-     * 读起来像「必须先解墙才能斩杀」,他会照着把 8 点攻击力白撞在墙上。
-     * 判据就是 faceAtk:它是 0,随从对这次斩杀没有贡献。
-     */
     if (taunts.length && lethal.faceAtk > 0) seq.push(...lethal.wall.steps);
     for (const s of lethal.spells) seq.push(`打 ${s.name}(${s.cost}费 ${s.damage} 伤)`);
     for (const b of lethal.buffs) seq.push(`给随从贴 ${b.name}(${b.cost}费 +${b.atk}攻)`);
-    // 战吼步排在随从打脸之前:随从落地才能撞,而战吼是打出去就掉血。
-    // 顺序写反了他会先撞再用战吼,该省的那点攻击力就白撞在墙上了。
-    for (const b of lethal.battlecries) seq.push(`打 ${b.name}(${b.cost}费 战吼 ${b.damage} 伤打脸)`);
+    for (const b of lethal.battlecries) seq.push(`打 ${b.name}(${b.cost}费 ${b.tag ? b.tag : '战吼'} ${b.damage} 伤打脸)`);
+    for (const c of lethal.charges) seq.push(`打 ${c.name}(${c.cost}费 冲锋 ${c.damage} 伤打脸)`);
     if (lethal.faceAtk > 0) seq.push(`剩下的 ${lethal.faceAtk} 点攻击力打脸`);
     candidates.push(`可以斩杀:按 ${seq.join(' → ')} 的顺序走,合计 ${lethal.total} ≥ 对面 ${target}。`);
   }
 
   // 2. 会被斩杀 → 必须先解场
   if (threat.lethalNextTurn) {
-    // 打不出来的随从(无法攻击/休眠)本来就没在「对面场攻」里,清掉它不能算削减
     const removable = trades.filter((t) => t.kills).reduce((sum, t) => sum + (t.theirs.cantAttack ? 0 : t.theirs.atk), 0);
-    // 这里也只用**保证值**。随机分配的群伤按 0 算 —— 它不是能依靠的解场手段,
-    // 写进「还能再削 N 点」等于替它打包票。渲染上界的地方是 pickRemoval,那里会标「最多」。
-    const aoeCut = aoe.reduce((sum, a) => sum + a.cutMin, 0);
+    const aoeCut = aoe.filter((x) => x.selfHeroDamage < threat.myEffectiveHp).reduce((sum, a) => sum + a.cutMin, 0);
+    const singleCut = removals[0]?.cutSafe ?? 0;
     candidates.push(
       `危险:对面场攻 ${threat.enemyAttack}(${threatText(threat)}),我只有 ${threat.myEffectiveHp} 有效血 —— 不处理下回合就死。` +
-      ` 现在的攻击力能打掉对面 ${removable} 点场攻${aoeCut ? `,群体伤害还能再削 ${aoeCut}` : ''}。`,
+      ` 现在的攻击力能打掉对面 ${removable} 点场攻${aoeCut ? `,群体伤害还能再削 ${aoeCut}` : ''}${!aoeCut && singleCut > 0 ? `,单解/控制还能再削 ${singleCut}` : ''}。`,
     );
-    // 「打个硬币就能上」的牌要说出来。8 水晶这回合,9 费的尤格-萨隆其实打得出来 ——
-    // 只按 mana 算的话它整排看着都是打不出的,他会以为这轮只剩挨打的份。
-    // 实测 2026-10-24 第 16 回合:手上就那张尤格-萨隆,建议一个字没提。
     const coinPlays = hand.filter((c) => c.needsCoin && c.playable).slice(0, 2);
     if (coinPlays.length) {
       candidates[candidates.length - 1] +=
@@ -1260,12 +1568,8 @@ export function advise(snapshot: GameSnapshot, opts: AdviceOptions = {}): Advice
     } else if (board.every((m) => m.frozen)) {
       candidates.push(`对面 ${board.length} 个随从全被冻结,这回合打不出来,不用急着解。`);
     } else if (idle.length === board.length) {
-      // 全都没法攻击 / 休眠:它们挂着攻击力,但一分伤害也打不出来。
-      // 曾经这里落到最后一条分支,说「下回合能打出攻击」—— 一只 2 费 4/5 的上古看守者
-      // 明明写着「无法攻击」,她照着场面说了错话。
       candidates.push(`对面 ${idle.length} 个随从打不出来(${idle.map(label).join('、')}),挂着攻击力但动不了,这回合不用管它们。`);
     } else if (board.every((m) => m.atk <= 0 || m.cantAttack)) {
-      // 0 攻不等于没事:可能是墙、可能是亡语/复生。别让他以为这局可以随便打
       const wall = threat.tauntCount > 0 ? `,其中 ${threat.tauntCount} 个是嘲讽(共 ${threat.tauntHealth} 血)挡住你的攻击` : '';
       candidates.push(`对面 ${board.length} 个随从打不出伤害${wall}。`);
     } else {
@@ -1273,8 +1577,7 @@ export function advise(snapshot: GameSnapshot, opts: AdviceOptions = {}): Advice
     }
   }
 
-  // 2.5 身材之外的威胁:0 攻的嘲讽墙、剧毒、复生、亡语伤害。
-  //     威胁评估只算攻击力,这些在数值上全是 0,但会改变怎么打。
+  // 2.5 身材之外的威胁
   const notable = notableThreats(snapshot);
   if (notable.length) {
     const list = notable
@@ -1283,14 +1586,7 @@ export function advise(snapshot: GameSnapshot, opts: AdviceOptions = {}): Advice
     candidates.push(`对面场上要留意的:${list}。`);
   }
 
-  // 2.6 可交易：花 1 费把打不出的牌洗回牌库换一张。
-  //
-  // 这条路一直只在事件正文里（`prepareNote`），工具回执里从来没有 ——
-  // 她调 `hearthstone_advice` 时看到的只有「打得出的牌 N 张」，不知道手上那张
-  // 打不出的黑骑士其实能换掉。2026-11-04 复现：正文说「可以交易掉」，回执一字不提。
-  //
-  // 「打不出」按**回合总水晶**判，不按剩水 —— 回执是给她自己算账用的，
-  // 她要知道哪几张牌是死牌，剩多少水是后面另一步的事。
+  // 2.6 可交易
   const tradable = hand.filter((c) => c.tradeable && !c.playable && c.cost > 0);
   if (tradable.length) {
     candidates.push(
@@ -1298,7 +1594,7 @@ export function advise(snapshot: GameSnapshot, opts: AdviceOptions = {}): Advice
     );
   }
 
-  // 3. 有利交换。一个随从一回合只能打一次,所以按随从去重,只留每个随从最好的那个目标
+  // 3. 有利交换
   const bestPerMinion = new Map<number, TradeOption>();
   for (const t of trades) {
     const key = t.mine.id;
@@ -1314,23 +1610,23 @@ export function advise(snapshot: GameSnapshot, opts: AdviceOptions = {}): Advice
     const even = unique.filter((t) => t.kills).slice(0, 2);
     if (even.length) candidates.push(`只能同归于尽:${even.map((t) => t.text).join(';')}。`);
     else if (combined.length) {
-      // 一对一换不掉,但合力能解 —— 这是实战里最常见的一条线,不能漏
       candidates.push(`单个换不掉,但合力可以:${combined[0].text}。`);
     } else candidates.push('现有攻击力换不掉对面任何一个随从,别硬撞。');
   }
 
   // 4. 群体伤害
   if (aoe.length) candidates.push(`群体伤害:${aoe[0].text}。`);
-  // 单张清不掉的场面,几张叠起来可能清得掉。
-  // 2026-11-03 第 20 回合工具回执里没有这一行 —— 那一手(多张群伤叠 7 点清三面墙)
-  // 是她自己调工具、手算出来的。同一件事的两个出口要一起给,不能只给事件正文。
-  const manyAoe = aoeCombos(snapshot)[0];
+  const manyAoe = aoeCombos(snapshot, deckHasDup)[0];
   if (manyAoe && manyAoe.cut > (aoe[0]?.cutMin ?? 0)) {
     candidates.push(`群体伤害叠起来:${manyAoe.text}。`);
   }
 
-  // 4.5 手上能当回合就打的冲锋/突袭:这类牌等于「额外的一份解场或打脸」,
-  //     不算进斩杀线(那时算不了),但推荐时是最常见的关键一手,必须点出来
+  // 4.2 单解与保命牌
+  if (removals.length) {
+    candidates.push(`手牌单解与保命:${removals.slice(0, 3).map((r) => r.text).join(';')}。`);
+  }
+
+  // 4.5 手上能当回合就打的冲锋/突袭
   const impact = hand.filter((c) => c.playable && /突袭|冲锋/.test(c.note));
   if (impact.length) {
     candidates.push(
@@ -1338,30 +1634,25 @@ export function advise(snapshot: GameSnapshot, opts: AdviceOptions = {}): Advice
     );
   }
 
-  // 5. 这回合打得出的牌。只报「哪些打得出」,不替用户决定先出哪张 ——
-  //    先出哪张取决于牌面效果和对手打法,那是她的判断,不是这张表能算的
+  // 5. 这回合打得出的牌与词条状态
   const playable = hand.filter((c) => c.playable);
-
-  // 手上的战吼伤害。
-  //
-  // 2026-11-19 改:以前这里只提「最大的一张」,还明说「不进斩杀线」——
-  // 于是一手两张时间流具象(各 3 伤)、对面 6 血的标准斩杀永远看不出来。
-  // 现在能确定打出的已经由 planLethal 逐张算进 total,这里只说清「哪几张、多少点」,
-  // 没斩杀的时候当补刀提示,斩杀了就是斩杀序列的一部分。
-  //
-  // 分两种报:
-  //   · 前提满足的 —— 已进斩杀线,直接说能打多少
-  //   · 条件不满足 / 判断不了的 —— 说清前提,别让他以为打出去就有伤害
-  //     (雾帆劫掠者「战吼需装备武器」,没武器时它就是张 2/2 白板)
-  const me = {
-    weapon: !!snapshot.me.weapon,
-    minionCount: snapshot.me.minions.length,
-    auras: snapshot.me.auras?.length,
-  };
-  if (lethal.battlecries.length) {
-    const totalBc = lethal.battlecries.reduce((n, b) => n + b.damage, 0);
-    const names = lethal.battlecries.map((b) => `${b.name}(${b.cost}费 ${b.damage} 伤)`).join('、');
+  const me = makeBattlecryCtx(snapshot, deckHasDup);
+  const bcOnly = lethal.battlecries.filter((b) => b.tag !== '连击');
+  const comboHits = lethal.battlecries.filter((b) => b.tag === '连击');
+  if (bcOnly.length) {
+    const totalBc = bcOnly.reduce((n, b) => n + b.damage, 0);
+    const names = bcOnly.map((b) => `${b.name}(${b.cost}费 ${b.damage} 伤)`).join('、');
     candidates.push(`手上 ${names} 的战吼能打 ${totalBc} 点 —— 已经算进上面的斩杀线了。`);
+  }
+  if (comboHits.length) {
+    const totalCb = comboHits.reduce((n, b) => n + b.damage, 0);
+    const names = comboHits.map((b) => `${b.name}(${b.cost}费 ${b.damage} 伤)`).join('、');
+    candidates.push(`手上 ${names} 的连击能打 ${totalCb} 点 —— 已经算进上面的斩杀线了。`);
+  }
+  if (lethal.charges.length) {
+    const totalCg = lethal.charges.reduce((n, c) => n + c.damage, 0);
+    const names = lethal.charges.map((c) => `${c.name}(${c.cost}费 ${c.damage} 伤)`).join('、');
+    candidates.push(`手上 ${names} 的冲锋能打 ${totalCg} 点 —— 已经算进上面的斩杀线了。`);
   }
   for (const bc of conditionalBattlecries(playable.map((c) => c.cardId), me)) {
     const name = playable.find((c) => c.cardId === bc.cardId)?.name ?? bc.cardId;
@@ -1371,16 +1662,23 @@ export function advise(snapshot: GameSnapshot, opts: AdviceOptions = {}): Advice
       candidates.push(`手上 ${name} 的战吼要「${bc.condition}」才有 ${bc.damage} 点伤害 —— 这一条我判断不了,你自己看一眼。`);
     }
   }
+  if ((snapshot.me.imbueCount ?? 0) > 0) {
+    const hp = snapshot.me.heroPower;
+    const hpPart = hp && (hp.name || hp.note)
+      ? `,英雄技能${hp.name ? `「${hp.name}」` : ''}(${hp.cost}费${hp.note ? ` ${hp.note}` : ''})`
+      : '';
+    candidates.push(`灌注进度:我方已灌注 ${snapshot.me.imbueCount ?? 0} 次${hpPart}。`);
+  }
+  if (playable.some((c) => cardEffects(c.cardId).combo)) {
+    candidates.push(snapshot.me.comboActive
+      ? '连击状态:本回合已出过牌，连击词条已激活。'
+      : '连击状态:尚未出牌，打连击牌前记得先垫一张低费牌或硬币。');
+  }
   if (playable.length) {
     const list = playable.map((c) => `${c.name ?? c.cardId}(${c.cost}费${c.needsCoin ? '·要打硬币' : ''}${c.note ? ` ${c.note}` : ''}${c.keep ? '·核心牌' : ''})`);
-    // 预算含硬币,所以要把「钱从哪来」写清楚:5 水晶能打 6 费牌,是因为手上多了一个币
     const budget = manaBudget(snapshot.me);
-    // 只说「实打实能花多少」,不再报枚数 —— 硬币被加价时枚数和净水晶不是一个数,
-    // 两个都写出来会自相矛盾(2 枚硬币只值 1 点)。
     const coinNote = budget > snapshot.me.mana ? `(含硬币,实打实能花 ${budget} 点水晶)` : '';
     candidates.push(`打得出的牌 ${playable.length} 张,水晶 ${snapshot.me.mana}${coinNote}:${list.join('、')}。能同时出几张要看费用怎么凑。`);
-    // 这张清单是给**她**读的回执(以及给模型的二次判断),briefAdvice 那边已经
-    // 把核心牌摘出去了 —— 这里不标的话,她会从这张表里重新捡回来推荐。
     const keepPlayable = playable.filter((c) => c.keep);
     if (keepPlayable.length) {
       candidates.push(
@@ -1397,7 +1695,27 @@ export function advise(snapshot: GameSnapshot, opts: AdviceOptions = {}): Advice
   if (snapshot.me.deckCount <= 5) candidates.push(`牌库只剩 ${snapshot.me.deckCount} 张,快见底了。`);
   if (snapshot.me.handCount === 0) candidates.push('手牌空了,后面只能靠抽。');
 
-  return { lethal, hand, trades, combined, threat, aoe, candidates };
+  // 7. 记牌器与对手情报（仅在有效记牌/匹配信息到达时补充，绝不虚构）
+  if (opts.tracker) {
+    if (opts.tracker.deckSource !== 'none') {
+      const m = opts.tracker.me;
+      const parts: string[] = [];
+      if (m.remainingBurstCount > 0) parts.push(`剩余直伤 ${m.remainingBurstCount} 张(${m.remainingBurstDamage}点)`);
+      if (m.remainingAoe.length) {
+        const topAoe = m.remainingAoe.slice(0, 2).map((x) => `${x.name}×${x.left}(${Math.round(x.drawProb * 100)}%)`).join('、');
+        parts.push(`剩余清场:${topAoe}`);
+      }
+      if (m.hasDuplicates === false) parts.push('牌库已无重复(宇宙前提就绪)');
+      if (parts.length) candidates.push(`记牌器(${m.deckCount}张余):${parts.join(' · ')}。`);
+    }
+    if (opts.tracker.opponent.keyCardsUsed.length) {
+      const used = opts.tracker.opponent.keyCardsUsed.slice(0, 4).map((x) => `${x.name}×${x.count}`).join('、');
+      candidates.push(`对手已交解牌/关键牌:${used}。`);
+    }
+  }
+  if (opts.matchupHint) candidates.push(opts.matchupHint);
+
+  return { lethal, hand, trades, combined, threat, aoe, singleRemovals: removals, candidates };
 }
 
 /** 把场攻拆开说:随从多少、武器/英雄多少 —— 分开写才知道先解哪个。 */
@@ -1443,7 +1761,11 @@ export function renderAdvice(a: Advice, s: GameSnapshot): string {
     return `${who}:${x.heroClass || '职业未知'} ${x.health} 血${x.armor ? ` ${x.armor} 护甲` : ''} · 场面 ${board} · 手牌 ${Math.max(x.handCount, x.handCards?.length ?? 0)} 张 · 牌库 ${x.deckCount}`;
   };
 
-  lines.push(`第 ${s.turn} 回合${s.isMyTurn ? '(轮到我)' : '(轮到对手)'} · 我的水晶 ${s.me.mana}/${s.me.manaMax}`);
+  const comboTag = s.me.comboActive ? ' · 连击已激活' : '';
+  const imbueTag = (s.me.imbueCount ?? 0) > 0
+    ? ` · 灌注${s.me.imbueCount ?? 0}次${s.me.heroPower?.name ? `(${s.me.heroPower.name})` : ''}`
+    : '';
+  lines.push(`第 ${s.turn} 回合${s.isMyTurn ? '(轮到我)' : '(轮到对手)'} · 我的水晶 ${s.me.mana}/${s.me.manaMax}${comboTag}${imbueTag}`);
   lines.push(side(s.me, '我', false));
   lines.push(side(s.opponent, '对手', true));
 
@@ -1499,13 +1821,44 @@ function lethalSummary(p: LethalPlan, s: GameSnapshot): string {
   const target = s.opponent.health + s.opponent.armor;
   const taunts = s.opponent.minions.filter((m) => m.taunt);
   const bits: string[] = [];
-  bits.push(taunts.length ? `过墙后可打脸 ${p.faceAtk}` : `场攻 ${p.faceAtk}`);
+  // 清场组合下「过墙后可打脸」是错的说法：墙是被扫掉的，没有攻击力去撞。
+  bits.push(taunts.length
+    ? (p.viaClear ? `先清场后 ${p.faceAtk} 全打脸` : `过墙后可打脸 ${p.faceAtk}`)
+    : `场攻 ${p.faceAtk}`);
   if (p.spellDamage) bits.push(`直伤 ${p.spellDamage}(${p.spells.map((x) => `${x.name} ${x.cost}费`).join('+')})`);
   if (p.buffDamage) bits.push(`buff ${p.buffDamage}(${p.buffs.map((x) => x.name).join('+')})`);
   if (p.battlecryDamage) bits.push(`战吼 ${p.battlecryDamage}(${p.battlecries.map((x) => `${x.name} ${x.cost}费`).join('+')})`);
+  if (p.chargeDamage) bits.push(`冲锋 ${p.chargeDamage}(${p.charges.map((x) => `${x.name} ${x.cost}费`).join('+')})`);
   const total = p.total;
   const verdict = total >= target && total > 0 ? `够斩杀(对面 ${target})` : total > 0 ? `差 ${target - total},对面 ${target}` : `打不到脸(对面 ${target})`;
   return `${bits.join(' + ')} = ${total} → ${verdict}`;
+}
+
+/**
+ * 「先换」之外还有没有别的路 —— 只点那些能改变判断、但那句正文里没提到的牌。
+ *
+ * 2026-11-20 那局第 17 回合：我 30 血、19 点场攻，对面 15 血两道嘲讽（5/6、6/7），
+ * 手上 6 张：坚韧的托雷斯、飞龙机动、谦恭审判、血色斗士、生而平等、龙鳞军备。
+ * 建议只写了「两只 8/8 各撞一只，剩下两费下血色斗士，别贪着打脸」——
+ * 谦恭审判（3 费抽三张）和生而平等（2 费全场变 1 血）一个字没提。
+ * 而那两张正是当回合的钥匙：抽到群伤 → 平等 + 群伤把两道墙一起清掉 →
+ * 19 点场攻全部打脸，当回合就斩。按建议打，这一回合斩不了。
+ *
+ * **只报三类**：抽牌、全场变 1 血、群体伤害。共同点是「本身不产生伤害，
+ * 但能改变局面」—— 也正是斩杀线那套账看不见的东西。
+ * 加攻、直伤、随从不在里面：它们在「斩杀线」和「按费打」里各有位置，
+ * 这里再念一遍是凑字数。
+ */
+function openersInHand(a: Advice): string {
+  const isOpener = (c: HandCardView): boolean =>
+    c.playable && !c.isCoin && c.cost > 0
+    && ((/抽\s*\d+/.test(c.note) || (/抽/.test(c.note) && /牌/.test(c.note)))
+      || LEVELER_NOTE_RE.test(c.note)
+      || /伤害\s*\d+\s*群/.test(c.note));
+  const list = a.hand.filter(isOpener).slice(0, 2);
+  if (!list.length) return '';
+  return `手上还有${list.map((c) => `${c.name ?? c.cardId}(${c.cost}费)`).join('、')}`
+    + ' —— 别急着把攻击力全撞在墙上,先看它能不能把墙直接解决掉。';
 }
 
 /* ---------- 给回合事件用的紧凑建议 ---------- */
@@ -1567,15 +1920,23 @@ export function briefAdvice(snapshot: GameSnapshot, opts: AdviceOptions = {}): B
       // 原来只写「场攻 21 打脸 = 21」—— 数字是对的（21 已经扣过墙），
       // 可它听起来像「21 点全砸在脸上」，而实际上有一只随从是去撞墙的。
       // 他照着这句话决定「全推脸」的时候，中间那一步是看不见的。
+      //
+      // 清场组合（viaClear）是另一回事：墙是被扫掉的，没有任何随从去撞，
+      // 这时候再写「N 点去撞墙」就是反的，得单独说一句。
       const walled = a.lethal.swingsTotal - a.lethal.faceAtk;
-      bits.push(walled > 0
-        ? `总攻 ${a.lethal.swingsTotal}，${walled} 点去撞墙，剩 ${a.lethal.faceAtk} 打脸`
-        : `场攻 ${a.lethal.faceAtk} 打脸`);
+      bits.push(a.lethal.viaClear
+        ? `先清场，场攻 ${a.lethal.faceAtk} 全打脸`
+        : walled > 0
+          ? `总攻 ${a.lethal.swingsTotal}，${walled} 点去撞墙，剩 ${a.lethal.faceAtk} 打脸`
+          : `场攻 ${a.lethal.faceAtk} 打脸`);
     }
     for (const s of a.lethal.spells) bits.push(`${s.name} ${s.damage} 伤`);
     for (const b of a.lethal.buffs) bits.push(`${b.name} +${b.atk} 攻`);
     if (a.lethal.battlecryDamage) {
       bits.push(`战吼 ${a.lethal.battlecries.map((b) => `${b.name} ${b.damage}`).join('+')}`);
+    }
+    if (a.lethal.chargeDamage) {
+      bits.push(`冲锋 ${a.lethal.charges.map((c) => `${c.name} ${c.damage}`).join('+')}`);
     }
     return {
       kind: 'lethal',
@@ -1599,22 +1960,25 @@ export function briefAdvice(snapshot: GameSnapshot, opts: AdviceOptions = {}): B
     // 合计 20 血全算成清掉,于是输出「能削 15 点、对面剩 0 点场攻、死不了」——
     // 他当成活路打,下一回合就被打死。随机分配的下界是 0,判生死了不能拿上界。
     const remaining = Math.max(0, a.threat.enemyAttack - removal.cutSafe);
-    const hpAfter = a.threat.myEffectiveHp + heal;
+    const hpAfter = a.threat.myEffectiveHp + heal - removal.selfHeroDamage;
     // 「这回合不死」不等于「安全」:血是会被一点点磨掉的,对面下回合还能再下随从。
-    // 所以要求解完、回完血之后,余量还得剩出 closeCall 那个数,才算真稳住。
-    // 一开始只写 `hpAfter > remaining`,结果 17 血对 14 点场攻也被判「死不了」——
-    // 那是没死,但只差 3 点,和上一版说「不足为惧」是同一类错。
-    const safe = remaining <= 0 || hpAfter - remaining > CLOSE_CALL_MARGIN;
+    // 同时必须扣除 AOE 的自伤（比如地狱烈焰打自己 3 血）。
+    const safe = hpAfter > 0 && (remaining <= 0 || hpAfter - remaining > CLOSE_CALL_MARGIN);
+    const netDiff = heal - removal.selfHeroDamage;
+    const selfDamageNote = removal.selfHeroDamage > 0
+      ? (heal > 0
+        ? `、回 ${heal} / 自伤 ${removal.selfHeroDamage} 血(我 ${a.threat.myEffectiveHp}→${hpAfter})`
+        : `、自伤 ${removal.selfHeroDamage} 血(我 ${a.threat.myEffectiveHp}→${hpAfter})`)
+      : (heal > 0 ? `、回 ${heal} 血(我 ${a.threat.myEffectiveHp}→${hpAfter})` : '');
     // 削 1–2 点不值得单独说 —— 「能削 1 点,还差 25 点」读起来像在凑字数。
-    // 但有回血就必须报,那是真能救命的信息。
-    // 随机分配的牌报的是上界,所以前面挂「最多」—— 不挂就是不实。
-    const cutNote = cut >= 3 || heal > 0
-      ? `${removal.uncertain ? '最多' : ''}能削 ${cut} 点${heal > 0 ? `、回 ${heal} 血(我 ${a.threat.myEffectiveHp}→${hpAfter})` : ''}`
+    // 但有回血或自伤就必须报,那是真能改写生死的信息。
+    const cutNote = cut >= 3 || heal > 0 || removal.selfHeroDamage > 0
+      ? `${removal.uncertain ? '最多' : ''}能削 ${cut} 点${selfDamageNote}`
       : '';
     // 「还差 N 点」是拿保守值算的,随机牌要说清这是最坏情况,否则和「最多削」对不上账
     const verdict = safe
       ? `对面剩 ${remaining} 点场攻,死不了`
-      : `${removal.uncertain && cut > 0 ? '最坏情况' : ''}还差 ${Math.max(0, remaining - heal)} 点`;
+      : `${removal.uncertain && cut > 0 ? '最坏情况' : ''}还差 ${Math.max(0, remaining - netDiff)} 点`;
     // 手里有突袭/冲锋的牌,打出来当回合就能参与解场 —— 这是最容易被漏掉的一手
     const rush = a.hand.filter((c) => c.playable && /突袭|冲锋/.test(c.note));
     const rushNote = rush.length ? `;另外手上 ${rush[0].name} 打出来当回合就能补刀` : '';
@@ -1676,7 +2040,35 @@ export function briefAdvice(snapshot: GameSnapshot, opts: AdviceOptions = {}): B
     .filter((t) => t.kills && t.score >= TRADE_MIN_SCORE)
     .filter((t) => (seen.has(t.mine.id) ? false : (seen.add(t.mine.id), true)))[0];
   if (best && a.threat.enemyAttack > 0 && a.threat.margin <= TRADE_TRIGGER_MARGIN) {
-    return { kind: 'trade', face: 'determined', text: `先换:${best.text}。换完对面场攻剩 ${Math.max(0, a.threat.enemyAttack - best.theirs.atk)}。` };
+    // 后面这句是 2026-11-20 补的：只推「撞墙」而不提手上的抽牌/变形/群伤，
+    // 等于替他把「先把墙解决掉」这条路封了。见 openersInHand 的注释。
+    return {
+      kind: 'trade',
+      face: 'determined',
+      text: `先换:${best.text}。换完对面场攻剩 ${Math.max(0, a.threat.enemyAttack - best.theirs.atk)}。${openersInHand(a)}`,
+    };
+  }
+
+  // 3.5) 非濒死但对手至少 2 只随从且有确定清场（能扫 ≥2 只并砍至少 5 场攻，或直接全清）：
+  //      绝不能选会烧死自己、把自己烧进危险线、或烧光我方更大场面的自伤群伤。
+  if (foe.minions.length >= 2) {
+    const avoidList = opts.avoid ?? [];
+    const avoidedName = (n: string) => avoidList.some((x) => x && (n === x || n.includes(x) || x.includes(n)));
+    const bigClear = a.aoe.find((x) =>
+      !x.spreads
+      && !avoidedName(x.name)
+      && x.selfHeroDamage < a.threat.myEffectiveHp
+      && (x.selfHeroDamage === 0 || (a.threat.myEffectiveHp - x.selfHeroDamage) > CLOSE_CALL_MARGIN)
+      && x.ownLostAtk < x.cutMin
+      && x.clears.length >= 2
+      && (x.cutMin >= 5 || x.clears.length === foe.minions.length));
+    if (bigClear) {
+      return {
+        kind: 'trade',
+        face: 'determined',
+        text: `清场:${bigClear.text}。`,
+      };
+    }
   }
 
   // 4) 不用解场 —— 按费出牌
@@ -1695,47 +2087,30 @@ export function briefAdvice(snapshot: GameSnapshot, opts: AdviceOptions = {}): B
     // 冲锋不受这个限制:它能直接打脸,空场照样有输出。
     const foeHasMinions = snapshot.opponent.minions.length > 0;
     const rank = (c: HandCardView) => {
-      // 要先付代价的牌排最后 —— 它不是「这回合正好用得上」,是「你觉得值再动」。
-      // 放在嘲讽之前判:暗石守卫同时带嘲讽和抉择,该按「有代价」算。
-      // **已经锻造过的就不用算了** —— 代价那一栏它已经付过,不许再当负担。
       if (hasCost(c)) return 4;
-      // 「使一个随从获得圣盾」得先有一个随从。我方空场时这张牌**根本打不出去** ——
-      // 费用够不代表能出,没目标就是废牌。实测 2026-10-24:我方空场 2 水晶,
-      // 她推「按费打:魔菇采掘(2费 圣盾 发掘)」,他反问「场上没有随从怎么用蘑菇啊」。
       if (c.type === '法术' && /圣盾/.test(c.note) && snapshot.me.minions.length === 0) return 4;
-      // 战吼只能打随从、而对面空场 —— 这时候它就是个身材等于费用的白板,
-      // 别占用「按费打」的头名。实测第 5 回合对面空场,她推了蹄铁发射机,战吼白扔。
-      const pd = playDamage(c);
+      const fx = cardEffects(c.cardId);
+      const pd = playDamage(c, 0, {
+        comboActive: snapshot.me.comboActive,
+        battlecry: makeBattlecryCtx(snapshot, opts.tracker?.me.hasDuplicates),
+      });
       if (pd && pd.battlecry && pd.minionOnly && !foeHasMinions) return 3.5;
       if (/冲锋/.test(c.note)) return 0;
       if (/突袭/.test(c.note)) return foeHasMinions ? 0 : 3;
-      // 嘲讽只在**有压力**时才值得排前面。
-      //
-      // 原来是无条件 `return 1`,排在普通牌(2)之前 —— 于是只要手里有墙,她永远先推墙,
-      // 不管这会儿是攻是守。实测 2026-10-29 第 12 回合:对面 18 血、我 30 血、
-      // 对面场攻才 4,她推「救生员(4费 2/7 嘲讽)」;而手上那张「大力扣杀(6费 伤害4 +4/+4)」
-      // 才是该打的。他打了后者,那局赢了。
-      // 第 14 回合同样:对面 4 血,她还在推架墙,他上了「日斑巨龙(6/6 吸血)」。
-      //
-      // 判据:对面场攻 × 2 都还压不死我,就是安全局 —— 那时候架墙等于把进攻让出去。
-      // 判据用 selfKeyword,不用 /嘲讽/.test(note) —— 摘要里「嘲讽」可能是在说
-      // 它召唤/给别人加的那只随从(雏龙牧人),那种牌自己是白板,不该按墙排。
-      //
-      // **但「安全」不等于「这张牌是白板」。** 原来安全局给 2.5、对面空场给 3,
-      // 效果是:只要手里有一张同费法术,嘲讽随从永远排在它后面 —— 于是连着几局
-      // 系统推光环 / 他打随从(2026-11-03 那 8 局里同一个模式出现 6 次:
-      // 加速光环→正义保护者、誓缚光环→警戒哨卫)。
-      // 1 费 1/1 圣盾嘲讽、3 费 2/3 嘲讽这些是**标准曲线**,空场下出去是去站场的,
-      // 不是为了挡 —— 墙的价值打折可以,但不能打到「不如一张空法术」。
+      // 战吼能确定点杀敌方随从：当回合即时收益高，提权到普通随从前面
+      if (c.type === '随从' && pd && pd.battlecry && pd.ready && foeHasMinions
+        && foe.minions.some((m) => !m.divineShield && m.health <= pd.damage)) {
+        return 1.2;
+      }
       if (selfKeyword(c.note, '嘲讽')) {
-        // 对面空场:按「这张随从值不值这个费」判,不再一律当白板。
-        // 早期曲线(3 费以内)直接下;贵的纯墙(4 费以上、攻还低)才降权。
         if (a.threat.enemyAttack <= 0) {
           const body = cardBody(c.cardId);
           return c.cost <= 3 || (body?.atk ?? 0) >= 3 ? 2 : 3;
         }
         return a.threat.myEffectiveHp <= a.threat.enemyAttack * 2 ? 1 : 2;
       }
+      // 灌注牌不视作纯空法术降权，适度提权帮助英雄技能升级
+      if (fx.imbue) return 1.6;
       // 「把所有随从的生命值变为 1」这类牌不是普通填充。
       //
       // 生而平等打出去对自己的场面同样生效 —— 它要么是清场的前半手,要么是斩杀组合,
@@ -1876,22 +2251,7 @@ export function briefAdvice(snapshot: GameSnapshot, opts: AdviceOptions = {}): B
     // 用户当场说「4费回合不能上德雷阿佳斯」:他要的不是两张并列的候选,是一句能照做的账。
     const mana = manaBudget(snapshot.me);
     const first = sorted[0];
-    // 第二张也得是「该打的牌」。原来只查费用够不够 ——
-    // 实测 2026-10-29 第 12 回合:
-    //   「按费打:坚韧的托雷斯(5费 3/4 嘲讽 圣盾)、阳炎清算(2费 伤害1群随从)」
-    // 阳炎清算是留着清场的那张,被当成「填剩下的 1 费」推了出去 —— 等于教他拿清场
-    // 资源换 1 点脸伤。首选那条的注释里写死过这个错,次选一直漏着。
-    //
-    // **只填两张不够。** 2026-11-03 第 14 回合:7 水晶、8 张手牌,只推一张 4 费的
-    // 石心之王,剩 3 费写句「剩 3 费」就完了 —— 那一回合真正能做的事少了一半,
-    // 而「剩 3 费」本身不是建议,只是把没花的钱数了一遍。第 4 回合「剩 1 费」同理。
-    //
-    // 现在填到**打不动为止**,上限 3 张:再多的话「按费打:A、B、C、D」读起来
-    // 像在报牌面,而且这种场合多出来的通常是 1 费填充牌,列全了也没信息量。
-    //
-    // 填充牌不吃硬币:硬币只该为「值得的那一张」垫一次费用,拿来给 1 费小牌凑数
-    // 等于白花一次出牌机会。第一张若已经声明要打硬币,剩下的预算里就不再花第二份。
-    const picks = [first];
+    let picks = [first];
     let left = mana - first.cost;
     for (const c of sorted.slice(1)) {
       if (picks.length >= 3) break;
@@ -1901,13 +2261,27 @@ export function briefAdvice(snapshot: GameSnapshot, opts: AdviceOptions = {}): B
       picks.push(c);
       left -= c.cost;
     }
+
+    // 未激活连击时：若选出的手牌同时含连击牌与非连击启动牌，确保先打启动牌触发连击
+    let comboOrderNote = '';
+    if (!snapshot.me.comboActive) {
+      const isCombo = (c: HandCardView) => cardEffects(c.cardId).combo;
+      const comboPicks = picks.filter(isCombo);
+      const starters = picks.filter((c) => !isCombo(c));
+      if (comboPicks.length && starters.length && isCombo(picks[0])) {
+        picks = [starters[0], ...picks.filter((c) => c !== starters[0])];
+        comboOrderNote = `;先出${starters[0].name ?? starters[0].cardId}垫费激活连击,再打${comboPicks.map((c) => c.name ?? c.cardId).join('、')}`;
+      } else if (comboPicks.length && !starters.length) {
+        const hasExtraStarter = a.hand.some((c) => !c.isCoin && !isCombo(c) && !picks.includes(c) && c.cost <= left)
+          || a.hand.some((c) => c.isCoin && c.cost <= left);
+        if (hasExtraStarter) {
+          comboOrderNote = `;出${comboPicks[0].name ?? comboPicks[0].cardId}前记得先垫一张低费牌/硬币触发连击`;
+        }
+      }
+    }
+    const lead = picks[0];
+
     const list = picks.map((c) => `${c.name ?? c.cardId}(${c.cost}费${c.needsCoin ? '·要打硬币' : ''}${plainSpellNote(c) ? '·资源牌' : ''}${c.note ? ` ${c.note}` : ''})`).join('、');
-    // 「剩 N 费」不是建议,是把没花的钱数了一遍。得说清**为什么**剩 ——
-    // 不然他分不清是「手上真没牌了」还是「系统漏看了」。
-    //
-    // 2026-11-03 第 14 回合:7 水晶、8 张手牌,只推一张 4 费的石心之王,剩 3 费。
-    // 实情是剩下的能打的只有奉献(3费)和阳炎清算(2费),都是群伤,rank 3 不当填充。
-    // 那句话当时是光秃秃的,他没法知道这 3 费是账算完了还是没算。
     let spareNote = '';
     if (left > 0) {
       const affordable = sorted.slice(1).filter(
@@ -1921,10 +2295,6 @@ export function briefAdvice(snapshot: GameSnapshot, opts: AdviceOptions = {}): B
       spareNote = `,剩 ${left} 费${why}`;
     }
     const keepNote = keepNoteText(keepNow);
-    // 代价牌要交代清楚,分两种情况:
-    //   进了推荐 → 提醒括号里那些是代价
-    //   被跳过   → 说明它也在手上,为什么没推(不然他以为系统没看见)
-    // 第二种更要紧:只推 3/6 白板、不提手上有 6/8 嘲讽,他会觉得建议莫名其妙。
     const costlyIn = picks.filter((c) => hasCost(c));
     const costlyOut = sorted.filter((c) => hasCost(c) && !picks.includes(c));
     const costNote = costlyIn.length
@@ -1935,27 +2305,19 @@ export function briefAdvice(snapshot: GameSnapshot, opts: AdviceOptions = {}): B
     const damageNote = pickDamageNote(picks, snapshot);
     const spent = picks.reduce((n, c) => n + c.cost, 0);
     const wallNote = wallBreakerNote(a, snapshot, picks, spent);
-    // 给「她自己打牌」用的结构化动作。**只给随从。**
-    //
-    // 法术不碰的原因：炉石里指向性法术拖出去之后，游戏会进「选目标」状态等着 ——
-    // 她不会点，这一手就卡在半空，他还得自己收尾。随从即使带战吼，也是落地之后才选目标，
-    // 拖出去这一步本身永远是完整的。
-    //
-    // `handIndex` 用 `a.hand` 的下标，和屏幕上从左到右的顺序一致（parser 按 zonePos 排）。
-    // 拿不到下标就不给 —— 宁可不动，也不猜「大概是第几张」。
-    const handIndex = a.hand.indexOf(first);
-    const pick = first.type === '随从' && handIndex >= 0
+    const handIndex = a.hand.indexOf(lead);
+    const pick = lead.type === '随从' && handIndex >= 0
       ? {
         kind: 'play' as const,
         handIndex,
-        cardId: first.cardId,
-        name: first.name ?? first.cardId,
+        cardId: lead.cardId,
+        name: lead.name ?? lead.cardId,
         toFace: false,
       }
       : undefined;
     return {
       kind: 'develop',
-      text: `${threatHead(a.threat)},按费打:${list}${spareNote}${keepNote}${wallNote}${costNote}${damageNote}${facePushNote(snapshot)}${sneakyNote(snapshot)}${prepareNote(a.hand, snapshot.me, spent)}。`,
+      text: `${threatHead(a.threat)},按费打:${list}${spareNote}${keepNote}${wallNote}${costNote}${comboOrderNote}${damageNote}${facePushNote(snapshot)}${sneakyNote(snapshot)}${prepareNote(a.hand, snapshot.me, spent)}。`,
       ...(pick ? { pick } : {}),
     };
   }
@@ -2367,17 +2729,32 @@ function sneakyNote(snapshot: GameSnapshot): string {
  * 优先级:单随从换掉且不死 > 合力换掉且损失小 > 群体伤害。
  * 只挑能真减少对方攻击力的,磨血不算。
  */
-function pickRemoval(a: Advice): { text: string; cut: number; cutSafe: number; heal: number; uncertain: boolean } {
+type RemovalPick = {
+  text: string;
+  cut: number;
+  cutSafe: number;
+  heal: number;
+  selfHeroDamage: number;
+  uncertain: boolean;
+};
+
+function pickRemoval(a: Advice): RemovalPick {
+  const isSafe = (opt: { cutSafe: number; heal: number; selfHeroDamage: number }): boolean => {
+    const hpAfter = a.threat.myEffectiveHp + opt.heal - opt.selfHeroDamage;
+    const rem = Math.max(0, a.threat.enemyAttack - opt.cutSafe);
+    return hpAfter > 0 && (rem <= 0 || (hpAfter - rem) > CLOSE_CALL_MARGIN);
+  };
+
   const seen = new Set<number>();
   const clean = a.trades
     .filter((t) => t.kills && t.survives)
     .filter((t) => (seen.has(t.mine.id) ? false : (seen.add(t.mine.id), true)));
 
+  let cleanOpt: RemovalPick | null = null;
   if (clean.length) {
     const first = clean[0];
     let text = `${minionLabel(first.mine)} 换掉 ${minionLabel(first.theirs)}`;
     let cut = first.theirs.atk;
-    // 我方随从带吸血时,换掉对方的顺手回血 —— 这在残血时就是救命的那几点
     let heal = first.mine.lifesteal ? Math.min(first.mine.atk, first.theirs.health) : 0;
     const second = clean[1];
     if (second) {
@@ -2385,36 +2762,89 @@ function pickRemoval(a: Advice): { text: string; cut: number; cutSafe: number; h
       cut += second.theirs.atk;
       if (second.mine.lifesteal) heal += Math.min(second.mine.atk, second.theirs.health);
     }
-    return { text, cut, cutSafe: cut, heal, uncertain: false };
+    cleanOpt = { text, cut, cutSafe: cut, heal, selfHeroDamage: 0, uncertain: false };
+    if (isSafe(cleanOpt)) return cleanOpt;
   }
 
   const combined = a.combined.filter((c) => c.lost <= 1)[0];
-  if (combined) {
-    return { text: `${combined.steps.join(' + ')} 解掉 ${minionLabel(combined.target)}`, cut: combined.target.atk, cutSafe: combined.target.atk, heal: 0, uncertain: false };
+  const combinedOpt: RemovalPick | null = combined
+    ? {
+      text: `${combined.steps.join(' + ')} 解掉 ${minionLabel(combined.target)}`,
+      cut: combined.target.atk,
+      cutSafe: combined.target.atk,
+      heal: 0,
+      selfHeroDamage: 0,
+      uncertain: false,
+    }
+    : null;
+  if (!cleanOpt && combinedOpt && isSafe(combinedOpt)) return combinedOpt;
+
+  // 放出去直接烧死自己的 AOE 绝不作为求生方案
+  const aoe = a.aoe.find((x) => x.selfHeroDamage < a.threat.myEffectiveHp);
+  const aoeOpt: RemovalPick | null = aoe
+    ? {
+      text: aoe.spreads
+        ? `用 ${aoe.name} 打一下(伤害随机分给随从,最多清掉 ${aoe.clears.length} 只,不保证)`
+        : `用 ${aoe.name} 清场`,
+      cut: aoe.cutMax,
+      cutSafe: aoe.cutMin,
+      heal: aoe.heal,
+      selfHeroDamage: aoe.selfHeroDamage,
+      uncertain: aoe.spreads,
+    }
+    : null;
+
+  const single = a.singleRemovals[0];
+  const singleOpt: RemovalPick | null = single
+    ? {
+      text: single.kind === 'heal'
+        ? `用 ${single.name} 回血/叠甲`
+        : `用 ${single.text}`,
+      cut: single.cutSafe,
+      cutSafe: single.cutSafe,
+      heal: single.heal,
+      selfHeroDamage: 0,
+      uncertain: false,
+    }
+    : null;
+
+  // 若前面白吃/合击救不了命，而 AOE 或确定单解能直接脱离斩杀线，优先选用救命解
+  if (aoeOpt && !aoeOpt.uncertain && isSafe(aoeOpt)) return aoeOpt;
+  if (singleOpt && isSafe(singleOpt)) return singleOpt;
+
+  if (cleanOpt) return cleanOpt;
+  if (combinedOpt) return combinedOpt;
+
+  // 在 AOE 和单解之间择优：确定解（非随机且确定削攻/净回血更大）优于只给上界的随机 AOE
+  if (aoeOpt && singleOpt) {
+    if (aoeOpt.uncertain && singleOpt.cutSafe > 0) return singleOpt;
+    const aoeScore = aoeOpt.cutSafe + aoeOpt.heal - aoeOpt.selfHeroDamage;
+    const singleScore = singleOpt.cutSafe + singleOpt.heal;
+    if (!aoeOpt.uncertain && aoeScore >= singleScore) return aoeOpt;
+    return singleScore > aoeScore ? singleOpt : aoeOpt;
+  }
+  if (aoeOpt) return aoeOpt;
+  if (singleOpt) return singleOpt;
+
+  const drain = a.aoe.find((x) => x.heal > 0 && x.selfHeroDamage < a.threat.myEffectiveHp);
+  if (drain) {
+    return {
+      text: `用 ${drain.name} 回血`,
+      cut: 0,
+      cutSafe: 0,
+      heal: drain.heal,
+      selfHeroDamage: drain.selfHeroDamage,
+      uncertain: false,
+    };
   }
 
-  const aoe = a.aoe[0];
-  if (aoe) {
-    // 随机分配的群伤不能说成「清场」—— 它清不掉几张是抛硬币。
-    // 渲染报上界(cut),判「活不活得下来」只认下界(cutSafe)。
-    const text = aoe.spreads
-      ? `用 ${aoe.name} 打一下(伤害随机分给随从,最多清掉 ${aoe.clears.length} 只,不保证)`
-      : `用 ${aoe.name} 清场`;
-    return { text, cut: aoe.cutMax, cutSafe: aoe.cutMin, heal: aoe.heal, uncertain: aoe.spreads };
-  }
-
-  // 没有能清场的牌,但手里有吸血牌 —— 打出去至少能把血拉回来
-  const drain = a.aoe.find((x) => x.heal > 0);
-  if (drain) return { text: `用 ${drain.name} 回血`, cut: 0, cutSafe: 0, heal: drain.heal, uncertain: false };
-
-  return { text: '', cut: 0, cutSafe: 0, heal: 0, uncertain: false };
+  return { text: '', cut: 0, cutSafe: 0, heal: 0, selfHeroDamage: 0, uncertain: false };
 }
 
 /**
  * 给模型看的局面摘要。
  *
  * 只放**事实**,不放结论 —— 结论让它自己下,否则它只会复述我给的那句。
- * 也不放渲染好的长表格:那份是给人看的,给模型只会浪费上下文。
  */
 export function buildModelPrompt(s: GameSnapshot, opts: AdviceOptions = {}): string {
   const keep = parseKeepCards(opts.keepCards);
@@ -2424,29 +2854,26 @@ export function buildModelPrompt(s: GameSnapshot, opts: AdviceOptions = {}): str
   let keptInHand = 0;
   const hand = (s.me.handCards ?? []).map((c) => {
     const info = describeCard(c.cardId);
-    // 核心牌必须在这个摘要里也标出来。不然模型看到的就是一张普通的 3 费随从,
-    // 会理直气壮地建议「先上它占场」—— briefAdvice 那边刚做完的排除,从这里漏回去。
     const kept = isKept(c.cardId, info?.name ?? null, keep);
     if (kept) keptInHand += 1;
-    const note = handNote(c.cardId, c.prepared === true);
+    const note = handNote(c.cardId, c.prepared === true, c.darkGift);
     return `${info?.name ?? c.cardId}(${c.cost}费${note ? ` ${note}` : ''}${kept ? ',核心牌' : ''})`;
   }).join('、');
 
+  const statusExtras = [
+    s.me.comboActive ? '连击已激活' : '',
+    (s.me.imbueCount ?? 0) > 0
+      ? `灌注${s.me.imbueCount ?? 0}次${s.me.heroPower?.name ? `(${s.me.heroPower.name})` : ''}`
+      : '',
+  ].filter(Boolean).join(' · ');
+
   const lines = [
-    `第 ${s.turn} 回合,${s.isMyTurn ? '轮到我' : '轮到对手'},我的水晶 ${s.me.mana}/${s.me.manaMax}`,
+    `第 ${s.turn} 回合,${s.isMyTurn ? '轮到我' : '轮到对手'},我的水晶 ${s.me.mana}/${s.me.manaMax}${statusExtras ? ` · ${statusExtras}` : ''}`,
     `我:${s.me.heroClass || '职业未知'} ${s.me.health} 血${s.me.armor ? ` ${s.me.armor} 护甲` : ''};场面 ${board(s.me)};手牌 ${s.me.handCount} 张${hand ? `(${hand})` : ''};牌库 ${s.me.deckCount} 张`,
     `对手:${s.opponent.heroClass || '职业未知'} ${s.opponent.health} 血${s.opponent.armor ? ` ${s.opponent.armor} 护甲` : ''};场面 ${board(s.opponent)};手牌 ${s.opponent.handCount} 张(看不到);牌库 ${s.opponent.deckCount} 张`,
   ];
   if (s.me.spellPower) lines.push(`我场上法术伤害 +${s.me.spellPower}`);
-  /*
-   * **手牌里的 buff 该贴给谁**（2026-11-14）。
-   *
-   * 报障：「buff 情况的牌她都没有反应」。查下来 buff 在整条链上只出现在
-   * **斩杀计算**里（`lethal.buffs` → 斩杀序列、`buffDamage`），一旦这回合斩不了，
-   * 她一个字都不提 —— 手牌里躺着一张「+2攻」，场上还有随从，建议里当它不存在。
-   *
-   * 这里只补**事实**：哪张能打、贴给谁、贴完变多少。贴不贴是她自己的判断。
-   */
+
   const myMinions = s.me.minions.length ? s.me.minions : [];
   const usableBuffs = (s.me.handCards ?? [])
     .map((c) => lookupBuffCard(c.cardId))
@@ -2459,6 +2886,15 @@ export function buildModelPrompt(s: GameSnapshot, opts: AdviceOptions = {}): str
       + ` —— 贴给${minionLabel(best)}能变成 ${best.atk + first.atk}/${best.health + first.health}。`,
     );
   }
+  if (opts.tracker && opts.tracker.deckSource !== 'none') {
+    const m = opts.tracker.me;
+    const leftTop = m.remainingDeck.slice(0, 6).map((x) => `${x.name}×${x.left}(${Math.round(x.drawProb * 100)}%)`).join('、');
+    lines.push(`记牌器(${m.deckCount}张余):${leftTop || '已空'}${m.hasDuplicates === false ? ';牌库无重复(宇宙可用)' : ''}`);
+    if (opts.tracker.opponent.keyCardsUsed.length) {
+      lines.push(`对手已交:${opts.tracker.opponent.keyCardsUsed.slice(0, 4).map((x) => `${x.name}×${x.count}`).join('、')}`);
+    }
+  }
+  if (opts.matchupHint) lines.push(opts.matchupHint);
   if (keptInHand) {
     lines.push('注:标了「核心牌」的是玩家留着做配合的牌 —— 除非这回合能直接斩杀,否则不要建议提前打出去。');
   }

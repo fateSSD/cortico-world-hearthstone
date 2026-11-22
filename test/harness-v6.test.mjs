@@ -380,7 +380,7 @@ test('pushDeferred（H1）与 onHandoffEnded（H3/H4/H5/H10/H11）：回合实�
   }
 });
 
-test('webUi().storage 覆盖五项数据目录（H7 DIARY_FILE_RE 与 H8 先删盘后清内存）', () => {
+test('webUi().storage 覆盖六项数据目录（H7 DIARY_FILE_RE 与 H8 先删盘后清内存）', () => {
   const dir = mkdtempSync(join(tmpdir(), 'hs-v6-store-'));
   const customDiaryDir = join(dir, 'custom-diary');
   try {
@@ -394,9 +394,9 @@ test('webUi().storage 覆盖五项数据目录（H7 DIARY_FILE_RE 与 H8 先删�
 
     const world = definition.create(fakeContext(dir));
     const ui = world.webUi('zh');
-    assert.ok(Array.isArray(ui.storage) && ui.storage.length === 5);
+    assert.ok(Array.isArray(ui.storage) && ui.storage.length === 6);
     assert.deepEqual(ui.storage.map((s) => s.key), [
-      'hearthstone-archive', 'hearthstone-games', 'hearthstone-arena', 'hearthstone-diary', 'hearthstone-style',
+      'hearthstone-archive', 'hearthstone-games', 'hearthstone-arena', 'hearthstone-diary', 'hearthstone-style', 'hearthstone-tracker',
     ]);
     for (const part of ui.storage) assert.match(part.key, /^hearthstone-[a-z]+$/, 'H23: StoragePart key 必须使用连字符前缀');
 
@@ -1329,14 +1329,14 @@ test('第五轮 deferred：旧实例同 attempt+senderKey 的迟到回执不得�
   }
 });
 
-test('第五轮 webUi(en)：五个 StoragePart 的声明、stat 与 clear 回执全英文且 key 不变', async () => {
+test('第五轮 webUi(en)：六项 StoragePart 的声明、stat 与 clear 回执全英文且 key 不变', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'hs-r5-storage-en-'));
   try {
     const world = definition.create(fakeContext(dir));
     const zh = world.webUi('zh').storage;
     const en = world.webUi('en').storage;
     assert.deepEqual(en.map((part) => part.key), zh.map((part) => part.key));
-    assert.equal(en.length, 5);
+    assert.equal(en.length, 6);
     for (const part of en) {
       for (const text of [part.label, part.note, part.stat()]) {
         assert.match(text, /[A-Za-z]/, `${part.key}: 英文声明不得为空或仅含数字`);

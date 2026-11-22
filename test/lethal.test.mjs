@@ -6,7 +6,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { planLethal, breachTaunts, heroSwing, swingsOf, buffsInHand, worstCaseFaceAttack } from '../src/lethal.ts';
+import { planLethal, breachTaunts, heroSwing, swingsOf, buffsInHand, worstCaseFaceAttack, detectSweep } from '../src/lethal.ts';
 
 const minion = (o = {}) => ({
   id: 1, name: '', cardId: '', atk: 0, health: 1, maxHealth: 1,
@@ -331,4 +331,176 @@ test('随机落点的战吼不算打脸伤害', () => {
     boardAttack: { mine: 0, theirs: 0 },
   };
   assert.equal(planLethal(s).battlecryDamage, 0, '随机落点的战吼不该算成打脸');
+});
+
+/* ---------- 清场组合：生而平等 + 群伤（2026-11-20） -------------------- */
+
+const EQ = { id: 71, cardId: 'CORE_EX1_619', cost: 2 };      // 生而平等：所有随从变 1 血
+const TIME = { id: 72, cardId: 'TIME_019', cost: 4 };         // 时间流具象：战吼 3 伤打敌方全体，需光环
+const AURA = [{ cardId: 'BE_146', name: '誓缚光环' }];
+
+/** 2026-11-20 那局第 17 回合的真实场面。 */
+const t17 = (meOver = {}, foeMinions = null) => snap(
+  side({
+    health: 30, mana: 9, manaMax: 9,
+    auras: AURA,
+    handCards: [EQ, TIME],
+    minions: [
+      minion({ id: 11, name: '时间流具象', atk: 3, health: 2 }),
+      minion({ id: 12, name: '灭世信徒', atk: 8, health: 8 }),
+      minion({ id: 13, name: '瓦尼尔士兵', atk: 8, health: 8, divineShield: true }),
+    ],
+    ...meOver,
+  }),
+  side({
+    isLocal: false, health: 15,
+    minions: foeMinions ?? [
+      minion({ id: 21, name: '女巫的学徒', atk: 5, health: 6, taunt: true }),
+      minion({ id: 22, name: '火羽精灵', atk: 4, health: 5 }),
+      minion({ id: 23, name: '滑行者巨怪', atk: 6, health: 7, taunt: true }),
+      minion({ id: 24, name: '烈焰元素', atk: 6, health: 7 }),
+    ],
+  }),
+);
+
+test('生而平等 + 群伤：两道墙一起清掉，19 点场攻全部能打脸', () => {
+  // viaClear 让文案能分清「撞开的」和「扫掉的」
+  const p = planLethal(t17());
+  assert.equal(p.viaClear, true, '这条路要走清场，不是撞墙');
+  assert.equal(p.swingsTotal, 19);
+  assert.equal(p.faceAtk, 19, '墙被扫掉了，不该再扣攻击力');
+  assert.equal(p.battlecryDamage, 3, '群伤那一下记在战吼账上');
+  assert.equal(p.total, 22);
+  assert.equal(p.total, p.faceAtk + p.spellDamage + p.buffDamage + p.battlecryDamage, '分项之和必须等于 total');
+  assert.match(p.wall.steps.join(' '), /生而平等/);
+  assert.ok(p.caveats.some((c) => /圣盾或复生/.test(c)), '保守口径要说出来');
+});
+
+test('对面嘲讽带圣盾 → 不走清场组合，退回撞墙', () => {
+  const p = planLethal(t17({}, [
+    minion({ id: 21, name: '女巫的学徒', atk: 5, health: 6, taunt: true, divineShield: true }),
+    minion({ id: 23, name: '滑行者巨怪', atk: 6, health: 7, taunt: true }),
+  ]));
+  // 群伤是一次伤害实例，圣盾把它整个吃掉 —— 1 血也死不了
+  assert.equal(p.faceAtk, 0, '不能装作清得掉');
+  assert.ok(p.caveats.some((c) => /带圣盾/.test(c)), '要说清为什么没走这条路');
+});
+
+test('对面随从带复生 → 不走清场组合', () => {
+  const p = planLethal(t17({}, [
+    minion({ id: 21, name: '女巫的学徒', atk: 5, health: 6, taunt: true, reborn: true }),
+    minion({ id: 23, name: '滑行者巨怪', atk: 6, health: 7, taunt: true }),
+  ]));
+  assert.equal(p.faceAtk, 3, '扫完还会以 1 血站起来，墙还在');
+  assert.ok(p.caveats.some((c) => /带复生/.test(c)));
+});
+
+test('没光环 → 群伤战吼前提不满足，清场组合不成立', () => {
+  const p = planLethal(t17({ auras: [] }));
+  assert.equal(p.faceAtk, 3);
+  assert.equal(p.battlecryDamage, 0);
+  assert.doesNotMatch(p.wall.steps.join(' '), /生而平等/);
+});
+
+test('费用不够 → 不走清场组合', () => {
+  const p = planLethal(t17({ mana: 5, manaMax: 5 }));
+  assert.doesNotMatch(p.wall.steps.join(' '), /生而平等/, '2+4=6 费，5 水晶凑不出来');
+  assert.equal(p.faceAtk, 3);
+});
+
+test('detectSweep：没墙就不接这条路', () => {
+  // 没嘲讽时场攻本来就全通，这条路没有额外价值，硬算只会把简单局面绕复杂
+  const me = side({ mana: 9, auras: AURA, handCards: [EQ, TIME] });
+  const foe = side({ isLocal: false, minions: [minion({ id: 21, atk: 4, health: 5 })] });
+  assert.equal(detectSweep(me, foe, 9), null);
+});
+
+test('detectSweep：手上没有变形牌就不接', () => {
+  const me = side({ mana: 9, auras: AURA, handCards: [TIME] });
+  const foe = side({ isLocal: false, minions: [minion({ id: 21, atk: 4, health: 5, taunt: true })] });
+  assert.equal(detectSweep(me, foe, 9), null);
+});
+
+test('清场组合比撞墙差时不采纳', () => {
+  // 只有一道 1 血嘲讽：直接撞掉只花 3 点，剩 16 打脸 + 战吼 3 = 19；
+  // 清场组合要花 6 费换来的还是 19，但占了两张牌 —— 不该被选中
+  const p = planLethal(t17({}, [
+    minion({ id: 21, name: '小墙', atk: 1, health: 1, taunt: true }),
+  ]));
+  assert.doesNotMatch(p.wall.steps.join(' '), /生而平等/, '有更便宜的路就不绕');
+  assert.equal(p.total, 19);
+});
+
+/* ---------- P0-① 敌我全伤 AOE 不准把死掉的我方随从算进斩杀 ---------- */
+
+const HELLFIRE = { id: 73, cardId: 'CS2_062', cost: 3 }; // 地狱烈焰：对所有角色造成 3 点伤害（伤害3群己）
+
+test('生而平等 + 地狱烈焰：我方无圣盾随从全变 1 血后一并烧死，绝不虚报假斩杀', () => {
+  // 复现审查报告原局面：我方两只 8/8，生而平等 + 地狱烈焰，对面 15 血一道 10 血大墙
+  const s = snap(
+    side({
+      health: 30, mana: 5, manaMax: 5,
+      handCards: [EQ, HELLFIRE],
+      minions: [
+        minion({ id: 11, name: '灭世A', atk: 8, health: 8 }),
+        minion({ id: 12, name: '灭世B', atk: 8, health: 8 }),
+      ],
+    }),
+    side({
+      isLocal: false, health: 15,
+      minions: [minion({ id: 21, name: '大墙', atk: 5, health: 10, taunt: true })],
+    }),
+  );
+  const sw = detectSweep(s.me, s.opponent, 5);
+  assert.ok(sw);
+  assert.equal(sw.hitsOwnMinions, true);
+  assert.equal(sw.hitsOwnHero, true);
+  assert.equal(sw.selfHeroDamage, 3);
+  assert.equal(sw.ownLostCount, 2);
+  assert.equal(sw.survivingFaceAtk, 0, '两只 8/8 被生而平等变 1 血后都会被地狱烈焰烧死，场攻归 0');
+
+  const p = planLethal(s);
+  assert.equal(p.viaClear, false, '烧光自己只剩 3 点打脸，绝不误报 19 点斩杀');
+  assert.ok(p.total < 15, `绝不允许虚报达到 15 斩杀线，实际=${p.total}`);
+});
+
+test('生而平等 + 地狱烈焰：我方随从全带圣盾且自身血够时才能保住场攻斩杀', () => {
+  const s = snap(
+    side({
+      health: 10, mana: 5, manaMax: 5,
+      handCards: [EQ, HELLFIRE],
+      minions: [
+        minion({ id: 11, name: '圣盾A', atk: 6, health: 8, divineShield: true }),
+        minion({ id: 12, name: '圣盾B', atk: 6, health: 8, divineShield: true }),
+      ],
+    }),
+    side({
+      isLocal: false, health: 15,
+      minions: [minion({ id: 21, name: '大墙', atk: 5, health: 10, taunt: true })],
+    }),
+  );
+  const p = planLethal(s);
+  assert.equal(p.viaClear, true);
+  assert.equal(p.faceAtk, 12);
+  assert.equal(p.spellDamage, 3);
+  assert.equal(p.total, 15);
+  assert.ok(p.caveats.some((c) => /伤己方英雄 3 血/.test(c)), '自伤 3 血必须在 caveats 明示');
+});
+
+test('生而平等 + 地狱烈焰：我方只有 3 血时会把自己烧死，直接拦住', () => {
+  const s = snap(
+    side({
+      health: 3, mana: 5, manaMax: 5,
+      handCards: [EQ, HELLFIRE],
+      minions: [minion({ id: 11, name: '圣盾A', atk: 12, health: 8, divineShield: true })],
+    }),
+    side({
+      isLocal: false, health: 15,
+      minions: [minion({ id: 21, name: '大墙', atk: 5, health: 10, taunt: true })],
+    }),
+  );
+  const sw = detectSweep(s.me, s.opponent, 5);
+  assert.ok(sw?.blocked && /烧死|先死了|伤自己/.test(sw.blocked));
+  const p = planLethal(s);
+  assert.equal(p.viaClear, false);
 });

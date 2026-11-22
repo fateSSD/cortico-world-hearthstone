@@ -17,26 +17,12 @@ import { fileURLToPath } from 'node:url';
  */
 type CardEntry = [string, number, string, string, string?, string?, string?];
 
-export interface CardEffects {
+export interface BaseTagEffects {
   /** 战吼造成多少伤害(0 = 没有)。 */
   battlecry: number;
-  /**
-   * **这张牌给多少点护甲**（0 = 没有）。
-   *
-   * 2026-11-14 补。原来这个字段根本不存在 —— 战士那几张护甲法术
-   * （放出鳄鱼 `TIME_873` 甲10、清理污染 `YOG_502` 甲3）在结构化数据里是**全 0**，
-   * 于是算斩杀时对手那 10 点甲等于不存在，她会说「能斩」而其实打不死。
-   *
-   * 触发这次的是一个真实报障：「打了一把战士，最后一回合她又迷惑了（我的法术效果）」。
-   */
+  /** **这张牌给多少点护甲**（0 = 没有）。 */
   armor: number;
-  /**
-   * 战吼有前提(「如果你装备着武器」「如果你控制着其他鱼人」之类)。
-   *
-   * 标签里写成 `b2?`,摘要里写成「战吼需装备武器」。**有条件就不能当确定伤害用** ——
-   * 实测:雾帆劫掠者(2/2,战吼需装备武器)被记成无条件 2 点,建议说
-   * 「手上这张战吼能打 2 点,打出去就补刀」,可他没武器,打出去一点伤害都没有。
-   */
+  /** 战吼有前提(「如果你装备着武器」「如果你控制着其他鱼人」之类)。 */
   battlecryConditional: boolean;
   /** 前提怎么写(中文短语,如 `装备武器`);没有前提为 null。 */
   battlecryCondition: string | null;
@@ -46,46 +32,67 @@ export interface CardEffects {
   spellPower: number;
   /** 攻击无视嘲讽。 */
   ignoreTaunt: boolean;
-  /**
-   * 吸血。
-   *
-   * 随从的吸血靠运行时 tag 就能读到,但**法术的吸血永远读不到** ——
-   * 法术不进场地,没有实体标签。所以这里必须从卡面摘要兜底,否则
-   * 「起源大厅 8 伤群体 + 吸血」在关键时刻会被当成普通清场牌:
-   * 实测 9 血面对 8 点场攻,打出它清场 + 回 8 血是唯一活路,而建议只说了「能削 8 点」。
-   */
+  /** 吸血。 */
   lifesteal: boolean;
-  /**
-   * 这张牌**可以锻造**(卡面带锻造词条)。
-   *
-   * 为什么需要这个字段:日志只告诉你「锻造完成了」(`xxx_t`),不告诉你「这是一张锻造牌」。
-   * 想判断「手上这张还没锻造、打出去要不要先付代价」,只能靠卡面词条 —— 也就是这里。
-   * 只认 mechanics 里的 FORGE,不按摘要文字猜:「战吼需你锻造过卡牌」那种不是锻造牌。
-   */
+  /** 这张牌**可以锻造**(卡面带锻造词条)。 */
   forge: boolean;
-  /**
-   * 这张牌**可以预备**(卡面关键词)。
-   *
-   * 预备 = 把牌拖进牌库,花掉全部剩余法力,换「消耗的法力 + 1」点减费,
-   * 但当回合不能再打出。所以它对手牌建议的意义是:**这回合打不出去的剩水可以换成折扣**。
-   *
-   * 和锻造一样,日志里没有「这是不是预备牌」的信息(只有「已经预备过了」的那一位),
-   * 判据只能来自卡面文本。
-   */
+  /** 这张牌**可以预备**(卡面关键词)。 */
   prepare: boolean;
-  /**
-   * 这张牌**可交易**。
-   *
-   * 花 1 费把它洗回牌库再抽一张 —— 和预备一样,是「用剩水换点东西」的手牌操作,
-   * 但它换的是**牌**,不是费用。判据只在卡面(`mechanics: TRADEABLE`),日志里读不到。
-   */
+  /** 这张牌**可交易**。 */
   tradeable: boolean;
 }
 
-const EMPTY: CardEffects = {
+export interface CardEffects extends BaseTagEffects {
+  /** 是否带连击词条。 */
+  combo: boolean;
+  /** 连击可造成的伤害（0 = 无）。 */
+  comboDamage: number;
+  /** 连击可加的攻击力（0 = 无）。 */
+  comboBuffAtk: number;
+  /** 是否可以灌注英雄技能。 */
+  imbue: boolean;
+  /** 是否与黑暗之赐相关。 */
+  darkGift: boolean;
+  /** 消灭效果。 */
+  destroy: boolean;
+  /** 变形效果。 */
+  transform: boolean;
+  /** 沉默效果。 */
+  silence: boolean;
+  /** 冻结效果。 */
+  freeze: boolean;
+  /** 恢复生命点数（0 = 无）。 */
+  heal: number;
+  /** 磁力关键词。 */
+  magnetic: boolean;
+  /** 群体伤害点数（0 = 无）。 */
+  aoeDamage: number;
+  /** 群体伤害是否为随机分配总量。 */
+  aoeSpreads: boolean;
+  /** 群体伤害是否只打随从。 */
+  aoeMinionsOnly: boolean;
+  /** 群体伤害是否也会打到己方随从（「所有角色 / 所有随从」）。 */
+  aoeHitsOwnMinions: boolean;
+  /** 群体伤害是否也会打到己方英雄（「所有角色」）。 */
+  aoeHitsOwnHero: boolean;
+  /** 打出时对己方英雄造成的确定自伤（0 = 无；覆盖群己与双方英雄）。 */
+  selfHeroDamage: number;
+}
+
+const BASE_EMPTY: BaseTagEffects = {
   battlecry: 0, armor: 0, battlecryConditional: false, battlecryCondition: null,
   deathrattle: 0, spellPower: 0, ignoreTaunt: false, lifesteal: false, forge: false,
   prepare: false, tradeable: false,
+};
+
+const EMPTY: CardEffects = {
+  ...BASE_EMPTY,
+  combo: false, comboDamage: 0, comboBuffAtk: 0,
+  imbue: false, darkGift: false,
+  destroy: false, transform: false, silence: false, freeze: false,
+  heal: 0, magnetic: false,
+  aoeDamage: 0, aoeSpreads: false, aoeMinionsOnly: false,
+  aoeHitsOwnMinions: false, aoeHitsOwnHero: false, selfHeroDamage: 0,
 };
 
 let table: Record<string, CardEntry> | null = null;
@@ -152,9 +159,9 @@ function lookupEntry(cardId: string): CardEntry | undefined {
 }
 
 /** 解析那串标签。`b3 d2 s1 t` → {battlecry:3, deathrattle:2, spellPower:1, ignoreTaunt:true} */
-export function parseTags(raw: string | undefined): CardEffects {
-  if (!raw) return { ...EMPTY };
-  const out: CardEffects = { ...EMPTY };
+export function parseTags(raw: string | undefined): BaseTagEffects {
+  if (!raw) return { ...BASE_EMPTY };
+  const out: BaseTagEffects = { ...BASE_EMPTY };
   for (const token of raw.split(/\s+/)) {
     if (!token) continue;
     // 末尾的 `?` 表示这条有前提(`b2?`)
@@ -183,17 +190,11 @@ export function parseTags(raw: string | undefined): CardEffects {
 export function cardEffects(cardId: string): CardEffects {
   if (!cardId) return { ...EMPTY };
   const entry = lookupEntry(cardId);
-  const fx = parseTags(entry?.[4]);
+  const base = parseTags(entry?.[4]);
+  const fx: CardEffects = { ...EMPTY, ...base };
   const note = entry?.[3] ?? '';
   // 吸血从摘要兜底:标签里没有这一项,而法术的吸血拿不到运行时 tag。
   if (/吸血/.test(note)) fx.lifesteal = true;
-  /*
-   * 护甲也走摘要兜底（2026-11-14）。
-   *
-   * 生成脚本里那条 `/获得\s*(\d+)\s*点护甲/` 是后加的，而现有卡表是加之前生成的 ——
-   * 实测 14,316 张牌里标签带「甲」的 **0 张**。但摘要里有（「甲10 召唤」），
-   * 所以从摘要里捞：`parseTags` 那条中文分支等下次重新生成卡表才会用上。
-   */
   if (!fx.armor) {
     const armor = /甲\s*(\d+)/.exec(note);
     if (armor) fx.armor = Number(armor[1]) || 0;
@@ -203,6 +204,42 @@ export function cardEffects(cardId: string): CardEffects {
   if (cond) {
     fx.battlecryConditional = true;
     fx.battlecryCondition = cond[1];
+  }
+
+  // 扩展词条与控制/生存/AOE 字段
+  if (/连击/.test(note)) {
+    fx.combo = true;
+    if (!/战吼/.test(note)) {
+      const dmg = /伤害\s*(\d+)/.exec(note);
+      if (dmg) fx.comboDamage = Number(dmg[1]) || 0;
+    }
+    const buffPair = /\+(\d+)\/\+\d+/.exec(note);
+    const buffAtk = /\+(\d+)攻/.exec(note);
+    if (buffPair) fx.comboBuffAtk = Number(buffPair[1]) || 0;
+    else if (buffAtk) fx.comboBuffAtk = Number(buffAtk[1]) || 0;
+  }
+  if (/(?<!已)灌注/.test(note)) fx.imbue = true;
+  if (/黑暗之赐/.test(note)) fx.darkGift = true;
+  if (/消灭/.test(note)) fx.destroy = true;
+  if (/变形/.test(note)) fx.transform = true;
+  if (/沉默/.test(note)) fx.silence = true;
+  if (/冻结/.test(note)) fx.freeze = true;
+  if (/磁力/.test(note)) fx.magnetic = true;
+  const heal = /奶\s*(\d+)/.exec(note);
+  if (heal) fx.heal = Number(heal[1]) || 0;
+  const aoe = /伤害\s*(\d+)\s*群(随机)?(随从)?(己)?/.exec(note);
+  if (aoe) {
+    fx.aoeDamage = Number(aoe[1]) || 0;
+    fx.aoeSpreads = Boolean(aoe[2]) || /随机/.test(note);
+    fx.aoeMinionsOnly = Boolean(aoe[3]) || /群(?:随机)?随从/.test(note);
+    const hitsOwn = Boolean(aoe[4]) || /群(?:随机)?(?:随从)?己/.test(note)
+      || (/(?:所有|每个)(?:其他)?(?:角色|随从)/.test(note) && !/敌方|敌人/.test(note));
+    fx.aoeHitsOwnMinions = hitsOwn;
+    fx.aoeHitsOwnHero = hitsOwn && !fx.aoeMinionsOnly;
+    if (fx.aoeHitsOwnHero) fx.selfHeroDamage = fx.aoeDamage;
+  } else {
+    const bothHeroes = /伤害\s*(\d+)\s*双方英雄/.exec(note);
+    if (bothHeroes) fx.selfHeroDamage = Number(bothHeroes[1]) || 0;
   }
   return fx;
 }
@@ -252,6 +289,12 @@ export function cardBody(cardId: string): { atk: number; health: number } | null
   const m = /^(\d+)\/(\d+)/.exec(note);
   if (!m) return null;
   return { atk: Number(m[1]), health: Number(m[2]) };
+}
+
+/** 这张牌的类型字母（S法术 / M随从 / W武器 / H英雄 / L地标 / 空串）。 */
+export function cardTypeOf(cardId: string): string {
+  if (!cardId) return '';
+  return lookupEntry(cardId)?.[2] ?? '';
 }
 
 /** 是不是传说牌(卡表第 7 位的 `L`)。 */
@@ -370,8 +413,53 @@ export function battlecryState(fx: CardEffects, me: BattlecryContext): Battlecry
   if (/控制着光环/.test(cond)) {
     return me.auras === undefined ? 'unknown' : me.auras > 0 ? 'ready' : 'blocked';
   }
-  // 「控X」需要种族信息,卡表没存;牌库/历史类判断不了
+  const imbueN = /已灌注\s*(\d+)\s*次/.exec(cond);
+  if (imbueN) {
+    const need = Number(imbueN[1]) || 1;
+    return me.imbueCount === undefined ? 'unknown' : me.imbueCount >= need ? 'ready' : 'blocked';
+  }
+  if (/已灌注过/.test(cond)) {
+    return me.imbueCount === undefined ? 'unknown' : me.imbueCount >= 1 ? 'ready' : 'blocked';
+  }
+  if (/手牌有黑暗之赐|手牌中有具有黑暗/.test(cond)) {
+    return me.hasDarkGiftInHand === undefined ? 'unknown' : me.hasDarkGiftInHand ? 'ready' : 'blocked';
+  }
+  if (/牌库.*没有(?:相同|重复)|套牌.*没有(?:相同|重复)/.test(cond)) {
+    return me.deckHasDuplicates === undefined ? 'unknown' : !me.deckHasDuplicates ? 'ready' : 'blocked';
+  }
+  // 「控X」需要种族信息,卡表没存;其余历史类判断不了
   return 'unknown';
+}
+
+export interface DarkGiftParsed {
+  charge: boolean;
+  doubleBattlecry: boolean;
+  taunt: boolean;
+  windfury: boolean;
+  lifesteal: boolean;
+  divineShield: boolean;
+  reborn: boolean;
+  elusive: boolean;
+  atkBonus: number;
+  hpBonus: number;
+}
+
+/** 解析手牌上的黑暗之赐效果。 */
+export function darkGiftEffects(giftCardId: string, giftNote = ''): DarkGiftParsed {
+  const cid = giftCardId.replace(/e\d*$/i, '');
+  const note = giftNote || cardNote(cid);
+  return {
+    charge: cid === 'EDR_100t6' || /冲锋/.test(note),
+    doubleBattlecry: cid === 'EDR_100t7' || /战吼会触发两次/.test(note),
+    taunt: cid === 'EDR_100t3' || /嘲讽/.test(note),
+    windfury: cid === 'EDR_100t13' || /风怒/.test(note),
+    lifesteal: cid === 'EDR_100t' || /吸血/.test(note),
+    divineShield: cid === 'EDR_100t13' || cid === 'EDR_100t10' || /圣盾/.test(note),
+    reborn: cid === 'EDR_100t9' || /复生/.test(note),
+    elusive: cid === 'EDR_100t1' || /扰魔/.test(note),
+    atkBonus: cid === 'EDR_100t' ? 3 : cid === 'EDR_100t1' ? 2 : cid === 'EDR_100t8' ? 4 : cid === 'EDR_100t2' ? -2 : 0,
+    hpBonus: cid === 'EDR_100t3' ? 4 : cid === 'EDR_100t1' ? 2 : cid === 'EDR_100t8' ? 5 : 0,
+  };
 }
 
 /** 判断条件够用到的对局事实。 */
@@ -386,6 +474,12 @@ export interface BattlecryContext {
    * 可选:`undefined` = 这一层没拿到信息,不该被当成「一定没有光环」。
    */
   auras?: number;
+  /** 本局已灌注次数（undefined = 没拿到这一层）。 */
+  imbueCount?: number;
+  /** 手牌中是否有带黑暗之赐的牌。 */
+  hasDarkGiftInHand?: boolean;
+  /** 牌库里是否还有重复牌（来自记牌器）。 */
+  deckHasDuplicates?: boolean;
 }
 
 /** 一手牌里带前提的战吼,连着前提一起报出来(判断结果在 `state`)。 */
@@ -435,4 +529,73 @@ export function sureBattlecry(
     best = { damage: fx.battlecry, cardId: id };
   }
   return best;
+}
+
+/* ---------- 共用群伤与全场变形判据（斩杀 / 清场 / 组合同一套口径） ---------- */
+
+/** 「把所有随从生命值变为 N（通常是 1）」的全场变形牌摘要模式。 */
+export const LEVELER_NOTE_RE = /所有随从.{0,8}生命值变为\s*1/;
+
+export interface ResolvedAoeCard {
+  kind: 'spell' | 'battlecry';
+  damage: number;
+  faceDamage: number;
+  spreads: boolean;
+  minionsOnly: boolean;
+  hitsOwnMinions: boolean;
+  hitsOwnHero: boolean;
+  selfHeroDamage: number;
+  lifesteal: boolean;
+  doubleBattlecry: boolean;
+}
+
+/**
+ * 统一解析手牌里一张可立即打出的群体伤害（法术或前提已就绪的战吼随从）。
+ *
+ * `detectSweep`、`aoeOptions`、`aoeCombos` 全部走这一处，避免各改一处时判据分叉。
+ */
+export function resolveHandAoeCard(
+  card: { cardId: string; darkGift?: { cardId: string; note: string } },
+  opts: { spellPower: number; battlecryCtx: BattlecryContext; boardSlotsFree: number },
+): ResolvedAoeCard | null {
+  if (!card.cardId) return null;
+  const fx = cardEffects(card.cardId);
+  if (fx.aoeDamage <= 0) return null;
+  const type = cardTypeOf(card.cardId);
+
+  let kind: 'spell' | 'battlecry' | null = null;
+  let damage = 0;
+  let doubleBattlecry = false;
+
+  if (type === 'S') {
+    kind = 'spell';
+    damage = fx.aoeDamage + opts.spellPower;
+  } else if (
+    type === 'M'
+    && opts.boardSlotsFree > 0
+    && fx.battlecry > 0
+    && battlecryState(fx, opts.battlecryCtx) === 'ready'
+  ) {
+    const dg = card.darkGift ? darkGiftEffects(card.darkGift.cardId, card.darkGift.note) : null;
+    const mult = dg?.doubleBattlecry ? 2 : 1;
+    kind = 'battlecry';
+    damage = fx.battlecry * mult;
+    doubleBattlecry = mult > 1;
+  } else {
+    return null;
+  }
+
+  if (damage <= 0) return null;
+  return {
+    kind,
+    damage,
+    faceDamage: fx.aoeMinionsOnly ? 0 : damage,
+    spreads: fx.aoeSpreads,
+    minionsOnly: fx.aoeMinionsOnly,
+    hitsOwnMinions: fx.aoeHitsOwnMinions,
+    hitsOwnHero: fx.aoeHitsOwnHero,
+    selfHeroDamage: fx.aoeHitsOwnHero ? damage : 0,
+    lifesteal: fx.lifesteal,
+    doubleBattlecry,
+  };
 }

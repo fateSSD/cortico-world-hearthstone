@@ -14,7 +14,7 @@
  * 3. **等不到就硬发。** 与其发一句错的,不如只报局面(甚至晚一批再发)。
  */
 import type { GameSnapshot, TurnPoint } from './parser.ts';
-import { briefAdvice } from './advice.ts';
+import { briefAdvice, type AdviceOptions } from './advice.ts';
 import { turnPointText, turnText } from './alerts.ts';
 
 export interface ComposedTurn {
@@ -62,6 +62,8 @@ export function composeTurnEvent(
    * 判据在 `world.ts` 里算 —— 这里只负责传，不判断「该不该避」。
    */
   avoid: string[] = [],
+  /** 记牌器与对手主流卡组匹配等额外上下文。 */
+  extra?: Pick<AdviceOptions, 'tracker' | 'matchupHint'>,
 ): ComposedTurn {
   // 只认同一回合:跨回合的数字绝不能混进同一句话
   const sameTurn = latest && latest.turn === point.turn ? latest : null;
@@ -70,7 +72,7 @@ export function composeTurnEvent(
   if (usable) {
     const base = turnText(usable);
     if (!advice) return { text: base, hasAdvice: false, defer: false };
-    const brief = briefAdvice(usable, { keepCards, avoid });
+    const brief = briefAdvice(usable, { keepCards, avoid, ...extra });
     // `建议[scared]:` —— 方括号里是表情 id。她在 `pet_say` 里写成 `<scared>`;
     // 直接写在 `建议:` 后面是为了不占额外一行,也避免被当成正文念出来。
     const face = brief.face ? `[${brief.face}]` : '';
@@ -131,11 +133,32 @@ export function advicePick(text: string): string {
   //
   // 分隔符只认「( 」「、」「空白」和分号 —— 这几个不会出现在牌名里。
   const play = /按费打[:：]\s*([^()\s、;；]+)/.exec(text);
-  if (play) return play[1].trim();
+  if (play) return asPickName(play[1]);
   // 换牌形态：「先换:xxx」
   const trade = /先换[:：]\s*([^()\s、;；]+)/.exec(text);
-  if (trade) return trade[1].trim();
+  if (trade) return asPickName(trade[1]);
+  // 清场形态：「清场:xxx(...)」
+  const clear = /清场[:：]\s*([^()\s、;；]+)/.exec(text);
+  if (clear) return asPickName(clear[1]);
   return '';
+}
+
+/**
+ * 抓出来的是不是「牌名」。
+ *
+ * 2026-11-20 补。`先换:` 后面原来接的是随从**身材**（`8/8 打 滑行者巨怪…`），
+ * 于是这一句被记成「她推了『8/8』这张牌」，写进日记是
+ * 「T17：我说『8/8』，他打了『谦恭审判』」，再被算进「推了他没听」的分歧。
+ * 历史上同型还有 4 处（「2/3」「2/1圣盾」「2/2」「3/3」），全在 `先换` 分支上。
+ *
+ * 现在文本侧已经改成「随从名(身材)」（见 advice.ts 的 myLabel），
+ * 这里再兜一层：纯数字身材 / 身材+关键词，一律不算牌名，宁可不参与去重统计。
+ */
+function asPickName(raw: string): string {
+  const name = raw.trim();
+  // 「8/8」「5/4」「2/1圣盾」—— 前半截是 a/b 的都算身材，不是牌名
+  if (/^\d+\s*\/\s*\d+/.test(name)) return '';
+  return name;
 }
 
 /**

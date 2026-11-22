@@ -96,3 +96,90 @@ test('点按钮推给她的事件:说清是他主动问的,并带上机械建议
   // 建议正文要原样带上,不然她还得再查一次工具
   assert.ok(text.includes(advice.text));
 });
+
+test('面板 progress 与 tracker 新字段可选透传且 world panelInvoke 支持导入卡组与段位/竞技场校准', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { encodeDeckString } = await import('../src/deck-code.ts');
+  const mod = await import('../src/index.ts');
+  const def = mod.default;
+
+  const dir = mkdtempSync(join(tmpdir(), 'hs-panel-invoke-'));
+  try {
+    const cfg = def.defaults();
+    const world = def.create({
+      id: def.id, cfg, timezone: 'Asia/Shanghai', botName: 'Coo',
+      botDir: process.cwd(), packageDir: process.cwd(), dataDir: dir, repoRoot: process.cwd(),
+      secret: () => '', storeSecret: () => {}, persist: (p) => Object.assign(cfg, p), restart: async () => {},
+    });
+
+    const invoke = (m, args = []) => world.panelInvoke('main', m, args);
+    const st0 = await invoke('status');
+    assert.ok(st0.status.progress, 'status 应当带 progress');
+    assert.ok(st0.status.tracker, 'status 应当带 tracker');
+
+    // 设置天梯段位与竞技场战绩
+    const rBad = await invoke('setRank', ['standard', '胡写一通']);
+    assert.equal(rBad.ok, false);
+    const rOk = await invoke('setRank', ['standard', '钻5 2星']);
+    assert.equal(rOk.ok, true);
+    assert.match(rOk.status.progress.ladderText, /钻5/);
+
+    const aOk = await invoke('setArena', [4, 1, 'underground']);
+    assert.equal(aOk.ok, true);
+    assert.match(aOk.status.progress.arenaText, /4胜1负/);
+
+    const aReset = await invoke('resetArena', ['arena']);
+    assert.equal(aReset.ok, true);
+    assert.equal(aReset.status.progress.arenaMode, 'arena');
+    assert.match(aReset.status.progress.arenaText, /0胜0负/);
+
+    // 编码一个测试标准卡组再通过 panelInvoke 导入与清除
+    const code = encodeDeckString({
+      format: 2,
+      heroes: [637], // HERO_08 法师
+      cards: [
+        { dbfId: 315, count: 1 }, // 火球术 CS2_029
+        { dbfId: 1004, count: 2 }, // 烈焰风暴 CS2_032
+      ],
+    });
+    const impBad = await invoke('importDeck', ['not-a-deck-code']);
+    assert.equal(impBad.ok, false);
+    const impOk = await invoke('importDeck', [`### 我的火球法\n${code}`]);
+    assert.equal(impOk.ok, true);
+    assert.equal(impOk.status.tracker.deckSource, 'imported');
+    assert.equal(impOk.status.tracker.hasImportedDeck, true);
+    assert.equal(impOk.status.tracker.deckName, '我的火球法');
+    assert.equal(impOk.status.tracker.myRemainingCount, 3);
+
+    // P1-⑤ 职业不符时 deckSource 变为 'none' 且 deckMismatch=true，但「清代码」依赖的 hasImportedDeck 必须仍为 true
+    world.onLines([
+      'D 18:00:00.0000000 GameState.DebugPrintPower() - CREATE_GAME',
+      'D 18:00:00.0000000 GameState.DebugPrintPower() - GameEntity EntityID=1',
+      'D 18:00:00.0000000 GameState.DebugPrintPower() - Player EntityID=2 PlayerID=1 GameAccountId=[hi=1 lo=1]',
+      'D 18:00:00.0000000 GameState.DebugPrintPower() - Player EntityID=3 PlayerID=2 GameAccountId=[hi=2 lo=2]',
+      'D 18:00:00.0000000 GameState.DebugPrintPower() - FULL_ENTITY - Creating ID=68 CardID=HERO_04',
+      'D 18:00:00.0000000 GameState.DebugPrintPower() -     tag=CONTROLLER value=1',
+      'D 18:00:00.0000000 GameState.DebugPrintPower() -     tag=CARDTYPE value=HERO',
+      'D 18:00:00.0000000 GameState.DebugPrintPower() -     tag=CLASS value=PALADIN',
+      'D 18:00:00.0000000 GameState.DebugPrintPower() -     tag=HEALTH value=30',
+      'D 18:00:00.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=2 tag=HERO_ENTITY value=68',
+      'D 18:00:00.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=1 tag=TURN value=1',
+    ], true);
+    const mismatchSt = await invoke('status');
+    assert.equal(mismatchSt.status.tracker.deckSource, 'none');
+    assert.equal(mismatchSt.status.tracker.deckMismatch, true);
+    assert.equal(mismatchSt.status.tracker.hasImportedDeck, true, '职业不符时仍必须暴露 hasImportedDeck=true 供面板显示清代码按钮');
+    const tr = mismatchSt.status.tracker;
+    const clearBtnHidden = !(tr.hasImportedDeck ?? (tr.deckSource === 'imported' || tr.deckMismatch));
+    assert.equal(clearBtnHidden, false, '职业不符时面板「清代码」按钮不能消失');
+
+    const clr = await invoke('clearDeck', []);
+    assert.equal(clr.ok, true);
+    assert.equal(clr.status.tracker.deckSource, 'none');
+    assert.equal(clr.status.tracker.hasImportedDeck, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

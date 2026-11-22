@@ -93,12 +93,12 @@ test('解说立场:设置页声明了,而且代码真的读它 —— 声明 ≠
   assert.ok(/panelVoice\s*\(/.test(src), '面板那个按钮要有处理函数');
 });
 
-test('World 能造出来,十一个工具都在,并且都带 handler', () => {
+test('World 能造出来,全部工具都在,并且都带 handler', () => {
   const world = definition.create(fakeContext());
   assert.equal(world.id, 'hearthstone');
   const tools = world.tools();
   const names = tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ['hearthstone_advice', 'hearthstone_diary', 'hearthstone_draft', 'hearthstone_his_style', 'hearthstone_last_game', 'hearthstone_meta', 'hearthstone_plan', 'hearthstone_recent', 'hearthstone_state', 'hearthstone_style', 'hearthstone_watch']);
+  assert.deepEqual(names, ['hearthstone_advice', 'hearthstone_diary', 'hearthstone_draft', 'hearthstone_his_style', 'hearthstone_last_game', 'hearthstone_matchup', 'hearthstone_meta', 'hearthstone_plan', 'hearthstone_recent', 'hearthstone_state', 'hearthstone_style', 'hearthstone_tracker', 'hearthstone_watch']);
   for (const t of tools) {
     assert.equal(typeof t.handler, 'function', `${t.name} 要有 handler`);
     assert.ok(t.tags.length > 0, `${t.name} 要有分类标签`);
@@ -159,7 +159,7 @@ test('扩展页:三盏灯、一块面板、三组配置、一份提示词模板'
   assert.equal(ui.promptDocs[0].role, 'envPrompt');
   assert.ok(ui.promptDocs[0].path.endsWith('ENV_PROMPT.md'));
   const varNames = ui.promptDocs[0].vars.map((v) => v.name).sort();
-  assert.deepEqual(varNames, ['hs.deck', 'hs.game', 'hs.mode', 'hs.rules', 'hs.status']);
+  assert.deepEqual(varNames, ['hs.deck', 'hs.game', 'hs.mode', 'hs.rules', 'hs.status', 'hs.tracker']);
 });
 
 test('面板那个按钮真的能切，而且切了会落盘', async () => {

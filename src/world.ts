@@ -22,7 +22,7 @@ import { ensureFigurePack, inspectFigurePack, type FigurePackResult } from './fi
 import { PowerLogTail, describeSearch, looksLikePowerLog, resolvePowerLog } from './log-source.ts';
 import { isCoinCard, PowerLogParser, renderSnapshot, type ActionRecord, type GameSnapshot, type SideState, type TurnPoint } from './parser.ts';
 import { detectAlerts, endMarker, endText, faceOf, lethalText, startText, surpriseAlerts, toneOf } from './alerts.ts';
-import { panelAdvice, panelAskText, panelStatus, type PanelAdvice, type PanelStatus } from './panel.ts';
+import { panelAdvice, panelAskText, panelStatus, type PanelAdvice, type PanelProgressView, type PanelStatus, type PanelTrackerView } from './panel.ts';
 import {
   describeLimit, describePowerLogging, ensureLogSizeUnlimited, ensurePowerLogging, installDirFromLog,
   logConfigPath, type PowerLogResult,
@@ -30,12 +30,19 @@ import {
 import { isPeerRunning } from './peer.ts';
 import { logSetupHint, peerProcessNames } from './platform.ts';
 import { appendDiary, appendDiaryNote, appendThought, DIARY_FILE_RE, readThoughts } from './diary.ts';
-import { advise, briefAdvice, buildModelPrompt, renderAdvice } from './advice.ts';
+import { advise, briefAdvice, buildModelPrompt, renderAdvice, type AdviceOptions } from './advice.ts';
 import { askModelWithUsage, pickKey, type LlmConfig, type LlmRequest, type LlmResult } from './llm.ts';
 import { advicePick, composeTurnEvent, playedCardName, sameCardName, settleTurnWatermark, shouldAnnounceTurn } from './turn-event.ts';
 import { isMulliganOpen, mulliganPlan, mulliganText } from './mulligan.ts';
 import { ARENA_GUIDE, deckBrief, deckListForModel, deckStats, resolveArenaCard, renderDraft } from './arena.ts';
 import { RULES_BRIEF, RULES_FOR_MODEL } from './rules.ts';
+import {
+  ProgressStore, arenaModeFromMeta, formatModeLabel, ladderFormatFromMeta,
+  type ArenaMode, type LadderFormat,
+} from './progress.ts';
+import { decodeDeckString, type DecodedDeck } from './deck-code.ts';
+import { ArchetypeStore, renderMatchupSummary, type ArchetypeEntry, type ArchetypeMatch } from './archetypes.ts';
+import { buildTrackerSnapshot, renderTrackerForModel, renderTrackerForPrompt, type TrackerSnapshot } from './tracker.ts';
 import {
   STYLE_SECTIONS, addStyleLine, dropStyleLine, ensureStyle, isStyleSection,
   readStyle, styleForPrompt, styleLineCount, stylePath,
@@ -543,7 +550,85 @@ const DIARY_DECL: Decl = {
   },
 };
 
-export const HEARTHSTONE_TOOL_DECLS: readonly Decl[] = [STATE_DECL, ADVICE_DECL, DRAFT_DECL, META_DECL, PLAN_DECL, STYLE_DECL, HIS_STYLE_DECL, DIARY_DECL, RECENT_DECL, LAST_GAME_DECL, WATCH_DECL];
+const TRACKER_DECL: Decl = {
+  name: 'hearthstone_tracker',
+  description:
+    'Deck tracker and ranked/arena progress tool. Call with action="status" (default) during a game to inspect '
+    + 'exact remaining cards and draw probabilities in your deck (when a deck code is imported or arena draft was recorded), '
+    + 'whether no duplicates remain for Reno/highlander triggers, cards the opponent has played (initial vs. created), '
+    + 'opponent hand card ages/created sources, secrets, and current ranked/arena win-loss record. '
+    + 'Also supports importing a Blizzard deck code (action="import_deck"), clearing it ("clear_deck"), '
+    + 'calibrating ranked tier ("set_rank", e.g. "钻5 2星" or "传说 #1200"), or calibrating/resetting arena wins and losses ("set_arena" / "reset_arena").',
+  parameters: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      action: {
+        type: 'string',
+        enum: ['status', 'import_deck', 'clear_deck', 'set_rank', 'set_arena', 'reset_arena'],
+        description: 'Operation to perform. Defaults to status.',
+      },
+      deckCode: { type: 'string', description: 'For import_deck: Blizzard deckstring or full in-game copied deck text.' },
+      deckName: { type: 'string', description: 'Optional label for the imported deck.' },
+      format: { type: 'string', enum: ['standard', 'wild', 'twist'], description: 'Ranked format for set_rank (defaults to standard or current match format).' },
+      rank: { type: 'string', description: 'For set_rank: current tier and stars, e.g. "钻5 2星", "白金10", or "传说 #800". Empty clears it.' },
+      starBonus: { type: 'integer', minimum: 1, maximum: 11, description: 'Optional season star bonus multiplier (1-11).' },
+      wins: { type: 'integer', minimum: 0, maximum: 12, description: 'For set_arena: current arena wins.' },
+      losses: { type: 'integer', minimum: 0, maximum: 3, description: 'For set_arena: current arena losses.' },
+      arenaMode: { type: 'string', enum: ['arena', 'underground'], description: 'Arena mode: arena (5W/2L) or underground (12W/3L).' },
+    },
+  },
+  tags: ['read', 'write'],
+  summary: {
+    zh: '记牌器与天梯/竞技场战绩：看剩余牌库概率/宇宙、对手已交牌与手牌滞留、导入卡组代码或校准段位/胜负。',
+    en: 'Deck tracker and ranked/arena progress: remaining deck odds, opponent played/hand tracking, deck code import, and rank/arena calibration.',
+  },
+};
+
+const MATCHUP_DECL: Decl = {
+  name: 'hearthstone_matchup',
+  description:
+    'Read or update local constructed ladder archetype intel for an opponent class (e.g. what meta decks that class plays right now, '
+    + 'their signature core cards, and key removals/finishers to play around). '
+    + 'Workflow: call with action="read" when a ranked game starts against a class. If no fresh cache (within 7 days) exists, '
+    + 'use browser_search to look up current Hearthstone meta decks for that format and class (e.g. "炉石传说 标准 <职业> 主流卡组" or "HSReplay/Vicious Syndicate <class>"), '
+    + 'distil 2-5 archetypes with coreCards and threats, and save them here with action="save". '
+    + 'Subsequent turns automatically match the opponent\'s non-created plays against these archetypes.',
+  parameters: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      action: { type: 'string', enum: ['read', 'save', 'clear'], description: 'read (default), save, or clear cached archetypes for this format+class.' },
+      format: { type: 'string', enum: ['standard', 'wild', 'twist'], description: 'Ladder format (defaults to current match format or standard).' },
+      heroClass: { type: 'string', description: 'Opponent hero class in Chinese, e.g. 法师 / 潜行者 / 战士 (defaults to current opponent).' },
+      archetypes: {
+        type: 'array',
+        description: 'For save: 1-8 mainstream meta archetypes for that class.',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            name: { type: 'string', description: 'Archetype name, e.g. 节奏贼.' },
+            coreCards: { type: 'array', items: { type: 'string' }, description: '3-10 signature Chinese card names used to identify this deck.' },
+            threats: { type: 'array', items: { type: 'string' }, description: 'Key board clears, finishers, or swing cards not yet played.' },
+            strategy: { type: 'string', description: '1 short sentence on how to play against it.' },
+          },
+          required: ['name', 'coreCards'],
+        },
+      },
+    },
+  },
+  tags: ['read', 'write'],
+  summary: {
+    zh: '天梯对手主流卡组库：读取或写入联网查到的对手职业主流构筑，对局中自动识别并提示未交出的关键牌。',
+    en: 'Read or store meta archetypes for opponent classes so the companion can recognise decks and pending threats.',
+  },
+};
+
+export const HEARTHSTONE_TOOL_DECLS: readonly Decl[] = [
+  STATE_DECL, ADVICE_DECL, TRACKER_DECL, MATCHUP_DECL, DRAFT_DECL, META_DECL, PLAN_DECL,
+  STYLE_DECL, HIS_STYLE_DECL, DIARY_DECL, RECENT_DECL, LAST_GAME_DECL, WATCH_DECL,
+];
 
 export class HearthstoneWorld implements World {
   readonly id = HEARTHSTONE_ID;
@@ -694,6 +779,10 @@ export class HearthstoneWorld implements World {
    * 上一版那盏灯只敢把装法写出来(理由见 `figureLamp`)。
    */
   private figurePack: FigurePackResult | null = null;
+  private readonly progress: ProgressStore;
+  private readonly archetypes: ArchetypeStore;
+  private readonly deckPath: string;
+  private importedDeck: { code: string; name: string; deck: DecodedDeck; savedAt: string } | null = null;
   private readonly opts: HearthstoneWorldOptions;
 
   constructor(opts: HearthstoneWorldOptions) {
@@ -706,6 +795,9 @@ export class HearthstoneWorld implements World {
     this.arenaPath = join(opts.dataDir, 'hearthstone-arena.json');
     this.metaPath = join(opts.dataDir, 'hearthstone-arena-meta.json');
     this.planPath = join(opts.dataDir, 'hearthstone-arena-plan.json');
+    this.deckPath = join(opts.dataDir, 'hearthstone-deck.json');
+    this.progress = new ProgressStore(opts.dataDir);
+    this.archetypes = new ArchetypeStore(opts.dataDir);
     this.llmKey = pickKey(opts.secret, [
       'CORTICO_HEARTHSTONE_DEEPSEEK_API_KEY',
       'CORTICO_BROWSER_DEEPSEEK_API_KEY',
@@ -715,6 +807,7 @@ export class HearthstoneWorld implements World {
     this.loadArenaMeta();
     this.loadArenaPlan();
     this.loadCelebrated();
+    this.loadImportedDeck();
   }
 
   /* ---------- 生命周期 ---------- */
@@ -1083,8 +1176,10 @@ export class HearthstoneWorld implements World {
     // 启动时补历史不该开口:那局可能早就打完了,对着一局结束的牌说「对局开始」很怪
     if (!initial && !this.announcedStart && this.readyToAnnounce(snapshot)) {
       this.announcedStart = true;
-      // 开局给个「精神起来」的脸:她在气泡里写成 <happy> 之类的行内标记
-      this.enqueue(() => this.push('hearthstone.game.start', 'hearthstone.game.start', `[happy]${startText(snapshot)}`, 'flush'));
+      const modeBrief = snapshot.meta?.gameType && snapshot.meta.gameType !== 'UNKNOWN'
+        ? this.progress.briefForMeta(snapshot.meta)
+        : undefined;
+      this.enqueue(() => this.push('hearthstone.game.start', 'hearthstone.game.start', `[happy]${startText(snapshot, modeBrief)}`, 'flush'));
     }
 
     // 「听歌时让路」：播放器在跑就按安静处理。让的是**主动解说**这一层（回合提醒、告警），
@@ -1144,7 +1239,9 @@ export class HearthstoneWorld implements World {
       }
       const avoid = this.advicePickStreak >= 2 && this.lastAdvicePick ? [this.lastAdvicePick] : [];
       const avoidCopy = [...avoid];
-      const composed = composeTurnEvent(point, snapshot, this.cfg.adviceInTurn !== false, this.cfg.keepCards, avoid);
+      const composed = composeTurnEvent(
+        point, snapshot, this.cfg.adviceInTurn !== false, this.cfg.keepCards, avoid, this.adviceExtra(snapshot),
+      );
       if (!composed.defer) {
         const expectedStart = snapshot.startedAt;
         const pushedTurn = snapshot.turn;
@@ -1181,7 +1278,9 @@ export class HearthstoneWorld implements World {
                 myHp: cur.me.health, myArmor: cur.me.armor, myHand: cur.me.handCount, myBoard: boardLine(cur.me),
                 foeHp: cur.opponent.health, foeArmor: cur.opponent.armor, foeHand: cur.opponent.handCount, foeBoard: boardLine(cur.opponent),
               };
-              const recomposed = composeTurnEvent(curPoint, cur, this.cfg.adviceInTurn !== false, this.cfg.keepCards, avoidCopy);
+              const recomposed = composeTurnEvent(
+                curPoint, cur, this.cfg.adviceInTurn !== false, this.cfg.keepCards, avoidCopy, this.adviceExtra(cur),
+              );
               if (recomposed.defer) {
                 clearTurnSlot();
                 return null;
@@ -1258,7 +1357,13 @@ export class HearthstoneWorld implements World {
       this.archive(snapshot);
       this.appendGameLog(snapshot);
       const key = gameKey(snapshot);
-      const text = endText(snapshot);
+      const rec = !initial
+        ? this.progress.recordGameResult(key, snapshot.meta, snapshot.result, snapshot.me.heroClass)
+        : { recorded: false };
+      const extraEnd = rec.summary ?? (snapshot.meta?.gameType && snapshot.meta.gameType !== 'UNKNOWN'
+        ? this.progress.briefForMeta(snapshot.meta)
+        : undefined);
+      const text = endText(snapshot, extraEnd);
       if (initial) {
         // 补历史期间不开口(那局可能早就打完了),先记着,等补完再看日志还新不新鲜
         this.pendingEnd = { result: snapshot.result, text, key };
@@ -1837,6 +1942,334 @@ export class HearthstoneWorld implements World {
     }
   }
 
+  /* ---------- 导入套牌 / 记牌器 / 进度 / 对手卡组情报 ---------- */
+
+  private loadImportedDeck(): void {
+    try {
+      if (!existsSync(this.deckPath)) { this.importedDeck = null; return; }
+      const raw = JSON.parse(readFileSync(this.deckPath, 'utf8')) as { code?: string; name?: string; savedAt?: string };
+      if (!raw?.code) { this.importedDeck = null; return; }
+      const res = decodeDeckString(raw.code);
+      if (!res.ok) { this.importedDeck = null; return; }
+      this.importedDeck = {
+        code: res.deck.code,
+        name: raw.name?.trim() || res.deck.name,
+        deck: { ...res.deck, name: raw.name?.trim() || res.deck.name },
+        savedAt: typeof raw.savedAt === 'string' ? raw.savedAt : '',
+      };
+    } catch {
+      this.importedDeck = null;
+    }
+  }
+
+  private saveImportedDeck(): void {
+    try {
+      if (!this.importedDeck) {
+        if (existsSync(this.deckPath)) unlinkSync(this.deckPath);
+        return;
+      }
+      writeAtomicSync(this.deckPath, JSON.stringify({
+        code: this.importedDeck.code,
+        name: this.importedDeck.name,
+        savedAt: this.importedDeck.savedAt,
+      }, null, 2));
+    } catch (error) {
+      this.log?.warn(`导入卡组没能存下来:${(error as Error).message}`);
+    }
+  }
+
+  private applyImportDeck(rawText: string, customName = ''): { ok: true; deck: DecodedDeck } | { ok: false; error: string } {
+    const res = decodeDeckString(rawText);
+    if (!res.ok) return res;
+    const finalName = customName.trim() || res.deck.name || `${res.deck.heroClass}套牌`;
+    const deck: DecodedDeck = { ...res.deck, name: finalName };
+    this.importedDeck = { code: deck.code, name: finalName, deck, savedAt: nowIso() };
+    this.saveImportedDeck();
+    return { ok: true, deck };
+  }
+
+  private clearImportedDeck(): boolean {
+    const had = this.importedDeck !== null || existsSync(this.deckPath);
+    this.importedDeck = null;
+    this.saveImportedDeck();
+    return had;
+  }
+
+  private currentTracker(snapshot: GameSnapshot | null): TrackerSnapshot | null {
+    if (!snapshot) return null;
+    const raw = this.parser.trackerData();
+    if (!raw) return null;
+    const arenaMode = arenaModeFromMeta(snapshot.meta);
+    return buildTrackerSnapshot(raw, {
+      importedDeck: arenaMode ? null : (this.importedDeck?.deck ?? null),
+      arenaDeck: arenaMode ? this.arenaDeck : undefined,
+    });
+  }
+
+  private currentMatchup(snapshot: GameSnapshot | null, tracker: TrackerSnapshot | null): ArchetypeMatch | null {
+    if (!snapshot || !snapshot.opponent.heroClass || !tracker) return null;
+    if (arenaModeFromMeta(snapshot.meta)) return null;
+    const fmt = ladderFormatFromMeta(snapshot.meta);
+    const played = tracker.opponent.initialPlayed.map((x) => x.name);
+    return this.archetypes.match(fmt, snapshot.opponent.heroClass, played, this.nowMs());
+  }
+
+  private adviceExtra(snapshot: GameSnapshot | null): Pick<AdviceOptions, 'tracker' | 'matchupHint'> {
+    if (!snapshot) return {};
+    const tracker = this.currentTracker(snapshot);
+    const matchup = this.currentMatchup(snapshot, tracker);
+    const matchupHint = matchup ? renderMatchupSummary(matchup, snapshot.opponent.heroClass) : '';
+    return { tracker, ...(matchupHint ? { matchupHint } : {}) };
+  }
+
+  private formatProgressPanelView(snapshot: GameSnapshot | null): PanelProgressView {
+    const prog = this.progress.snapshot();
+    const ladderFormat: LadderFormat = snapshot && snapshot.meta?.gameType
+      ? ladderFormatFromMeta(snapshot.meta)
+      : 'standard';
+    const track = prog.ladder[ladderFormat];
+    const ladderText = track.rankText
+      ? `${track.rankText}${track.estimated ? '(推算)' : ''}${track.wins + track.losses > 0 ? ` · ${track.wins}胜${track.losses}负` : ''}`
+      : (track.wins + track.losses > 0 ? `${track.wins}胜${track.losses}负` : '未设段位');
+    const arenaMode: ArenaMode = (snapshot ? arenaModeFromMeta(snapshot.meta) : null) ?? prog.arena?.mode ?? 'underground';
+    const run = prog.arena;
+    const arenaText = run
+      ? `${run.wins}胜${run.losses}负${run.active ? '' : '(已结)'}`
+      : '0胜0负';
+    const brief = snapshot?.meta?.gameType && snapshot.meta.gameType !== 'UNKNOWN'
+      ? this.progress.briefForMeta(snapshot.meta)
+      : `天梯(${ladderFormat === 'wild' ? '狂野' : ladderFormat === 'twist' ? '幻变' : '标准'}):${ladderText} | 竞技场:${arenaText}`;
+    return { brief, ladderFormat, ladderText, arenaMode, arenaText };
+  }
+
+  private formatTrackerPanelView(snapshot: GameSnapshot | null): PanelTrackerView {
+    const t = this.currentTracker(snapshot);
+    if (t && snapshot) {
+      const m = this.currentMatchup(snapshot, t);
+      const matchupBrief = m ? renderMatchupSummary(m, snapshot.opponent.heroClass) : '';
+      return {
+        inGame: !snapshot.ended,
+        hasImportedDeck: this.importedDeck !== null,
+        deckSource: t.deckSource,
+        deckName: t.deckName,
+        deckMismatch: t.deckMismatch,
+        myRemainingCount: t.me.deckCount,
+        myRemaining: t.me.remainingDeck.map((c) => ({
+          cardId: c.cardId,
+          name: c.name,
+          cost: c.cost,
+          left: c.left,
+          total: c.total,
+          prob: Math.round(c.drawProb * 1000) / 1000,
+          ...(c.extraCreated ? { extraCreated: true } : {}),
+        })),
+        myPlayed: t.me.playedCards.map((c) => ({ name: c.name, cost: c.cost, count: c.count })),
+        oppPlayed: [
+          ...t.opponent.initialPlayed.map((c) => ({ name: c.name, cost: c.cost, count: c.count, created: false })),
+          ...t.opponent.createdPlayed.map((c) => ({ name: c.name, cost: c.cost, count: c.count, created: true })),
+        ],
+        oppHand: t.opponent.handCards.map((h, idx) => ({
+          slot: idx + 1,
+          enteredTurn: h.enteredTurn,
+          age: h.heldTurns,
+          created: h.isCreated,
+          isCoin: h.isCoin,
+          ...(h.revealedName ? { revealedName: h.revealedName } : {}),
+          ...(h.creatorName ? { creatorName: h.creatorName } : {}),
+        })),
+        oppSecrets: t.opponent.secrets.length,
+        ...(t.me.hasDuplicates !== undefined ? { hasDuplicates: t.me.hasDuplicates } : {}),
+        remainingBurstDamage: t.me.remainingBurstDamage,
+        remainingBurstCount: t.me.remainingBurstCount,
+        ...(matchupBrief ? { matchupBrief } : {}),
+      };
+    }
+
+    if (this.importedDeck) {
+      const d = this.importedDeck.deck;
+      return {
+        inGame: false,
+        hasImportedDeck: true,
+        deckSource: 'imported',
+        deckName: d.name,
+        deckMismatch: false,
+        myRemainingCount: d.totalCards,
+        myRemaining: d.cards.map((c) => ({
+          cardId: c.cardId, name: c.name, cost: c.cost, left: c.count, total: c.count, prob: 0,
+        })),
+        myPlayed: [],
+        oppPlayed: [],
+        oppHand: [],
+        oppSecrets: 0,
+        hasDuplicates: d.cards.some((c) => c.count > 1),
+        remainingBurstDamage: 0,
+        remainingBurstCount: 0,
+      };
+    }
+
+    return {
+      inGame: false,
+      hasImportedDeck: false,
+      deckSource: 'none',
+      deckName: '',
+      deckMismatch: false,
+      myRemainingCount: 0,
+      myRemaining: [],
+      myPlayed: [],
+      oppPlayed: [],
+      oppHand: [],
+      oppSecrets: 0,
+      remainingBurstDamage: 0,
+      remainingBurstCount: 0,
+    };
+  }
+
+  private trackerReceipt(args: Record<string, unknown>): string {
+    const action = typeof args.action === 'string' ? args.action : 'status';
+    const snapshot = this.lastSnapshot ?? this.parser.snapshot();
+
+    if (action === 'import_deck') {
+      const code = typeof args.deckCode === 'string' ? args.deckCode : '';
+      const name = typeof args.deckName === 'string' ? args.deckName : '';
+      if (!code.trim()) return 'import_deck 需要提供 deckCode（暴雪卡组代码或游戏内复制的套牌分享文本）。';
+      const res = this.applyImportDeck(code, name);
+      if (!res.ok) return `导入失败：${res.error}`;
+      const d = res.deck;
+      const head = `已导入卡组「${d.name}」（${d.formatZh}${d.heroClass ? ` · ${d.heroClass}` : ''} · 共 ${d.totalCards} 张）。`;
+      const warn = d.unknownDbfIds.length ? `\n注意：有 ${d.unknownDbfIds.length} 条 dbfId 未收录在本地卡表（多为极新卡），其余正常跟踪。` : '';
+      const list = d.cards.slice(0, 12).map((c) => `${c.cost}费 ${c.name}×${c.count}`).join('、');
+      return `${head}${warn}\n构成预览：${list}${d.cards.length > 12 ? ` 等 ${d.cards.length} 种单卡` : ''}`;
+    }
+
+    if (action === 'clear_deck') {
+      const had = this.clearImportedDeck();
+      return had ? '已清空当前导入的卡组代码。' : '当前本来就没有导入卡组代码。';
+    }
+
+    if (action === 'set_rank') {
+      const fmtRaw = typeof args.format === 'string' ? args.format : '';
+      const fmt: LadderFormat = fmtRaw === 'wild' || fmtRaw === 'twist' || fmtRaw === 'standard'
+        ? fmtRaw
+        : (snapshot ? ladderFormatFromMeta(snapshot.meta) : 'standard');
+      const rank = typeof args.rank === 'string' ? args.rank : '';
+      const bonus = typeof args.starBonus === 'number' ? args.starBonus : undefined;
+      const res = this.progress.setRank(fmt, rank, bonus, nowIso());
+      if (!res.ok) return res.error ?? '段位格式没认出来。';
+      const fmtZh = fmt === 'wild' ? '狂野' : fmt === 'twist' ? '幻变' : '标准';
+      return res.track.rankText
+        ? `已校准 ${fmtZh}天梯段位：${res.track.rankText}${res.track.starBonus > 1 ? `（${res.track.starBonus}星加成）` : ''}。后续胜负将按星数规则推算并标明「推算」。`
+        : `已清空 ${fmtZh}天梯的起始段位设置。`;
+    }
+
+    if (action === 'set_arena') {
+      const wins = Number(args.wins ?? 0);
+      const losses = Number(args.losses ?? 0);
+      const mRaw = typeof args.arenaMode === 'string' ? args.arenaMode : '';
+      const mode: ArenaMode = mRaw === 'arena' || mRaw === 'underground'
+        ? mRaw
+        : ((snapshot ? arenaModeFromMeta(snapshot.meta) : null) ?? this.progress.snapshot().arena?.mode ?? 'underground');
+      const run = this.progress.calibrateArena(wins, losses, mode, snapshot?.me.heroClass || '', nowIso());
+      return `已校准 ${mode === 'arena' ? '普通竞技场(5胜2负)' : '地下竞技场(12胜3负)'} 当前战绩：${run.wins} 胜 ${run.losses} 负${run.active ? '' : '（本轮已结束）'}。`;
+    }
+
+    if (action === 'reset_arena') {
+      const mRaw = typeof args.arenaMode === 'string' ? args.arenaMode : '';
+      const mode: ArenaMode = mRaw === 'arena' || mRaw === 'underground'
+        ? mRaw
+        : ((snapshot ? arenaModeFromMeta(snapshot.meta) : null) ?? this.progress.snapshot().arena?.mode ?? 'underground');
+      const run = this.progress.resetArenaRun(mode, snapshot?.me.heroClass || '', nowIso());
+      return `已重开一轮 ${run.mode === 'arena' ? '普通竞技场' : '地下竞技场'}（0 胜 0 负）。`;
+    }
+
+    // status
+    const pView = this.formatProgressPanelView(snapshot);
+    const t = this.currentTracker(snapshot);
+    if (!snapshot || !t) {
+      const deckTip = this.importedDeck
+        ? `已导入卡组：「${this.importedDeck.name}」（${this.importedDeck.deck.heroClass || '职业未知'} · ${this.importedDeck.deck.totalCards} 张）`
+        : '尚未导入卡组代码（有牌代码才能看牌库剩余概率，竞技场则从选牌记录读取）。';
+      return `当前没有正在进行的对局。\n进度状态：${pView.brief}\n${deckTip}`;
+    }
+    const matchup = this.currentMatchup(snapshot, t);
+    return renderTrackerForModel(t, { progressBrief: pView.brief, matchup });
+  }
+
+  private matchupReceipt(args: Record<string, unknown>): string {
+    const action = typeof args.action === 'string' ? args.action : 'read';
+    const snapshot = this.lastSnapshot ?? this.parser.snapshot();
+    const fmtRaw = typeof args.format === 'string' ? args.format : '';
+    const format: LadderFormat = fmtRaw === 'wild' || fmtRaw === 'twist' || fmtRaw === 'standard'
+      ? fmtRaw
+      : (snapshot ? ladderFormatFromMeta(snapshot.meta) : 'standard');
+    const heroClass = typeof args.heroClass === 'string' && args.heroClass.trim()
+      ? args.heroClass.trim()
+      : (snapshot?.opponent.heroClass ?? '');
+
+    if (action === 'clear') {
+      if (!heroClass) {
+        this.archetypes.clearAll();
+        return '已清空全部职业的对手主流卡组情报缓存。';
+      }
+      const removed = this.archetypes.clearBucket(format, heroClass);
+      return removed
+        ? `已清空「${format} · ${heroClass}」的主流卡组缓存。`
+        : `本来就没有「${format} · ${heroClass}」的主流卡组缓存。`;
+    }
+
+    if (action === 'save') {
+      if (!heroClass) return 'save 需要提供 heroClass（如 法师 / 潜行者 / 战士）。';
+      const rawList = Array.isArray(args.archetypes) ? args.archetypes : [];
+      const entries: ArchetypeEntry[] = rawList
+        .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+        .map((item) => ({
+          name: String(item.name ?? '').trim(),
+          coreCards: Array.isArray(item.coreCards) ? item.coreCards.map((x) => String(x).trim()).filter(Boolean) : [],
+          threats: Array.isArray(item.threats) ? item.threats.map((x) => String(x).trim()).filter(Boolean) : [],
+          strategy: String(item.strategy ?? '').trim(),
+        }))
+        .filter((e) => e.name && e.coreCards.length > 0);
+      if (!entries.length) return 'save 需要至少一套有效卡组（每套含 name 和 coreCards）。';
+
+      const bucket = this.archetypes.saveBucket(format, heroClass, entries, nowIso());
+      const fmtZh = format === 'wild' ? '狂野' : format === 'twist' ? '幻变' : '标准';
+      const tracker = snapshot ? this.currentTracker(snapshot) : null;
+      const matchHint = snapshot && tracker && snapshot.opponent.heroClass === heroClass
+        ? `\n当前对局即时识别：${renderMatchupSummary(this.archetypes.match(format, heroClass, tracker.opponent.initialPlayed.map((x) => x.name), this.nowMs()), heroClass)}`
+        : '';
+      return `已存入【${fmtZh} · ${bucket.heroClass}】主流卡组 ${bucket.archetypes.length} 套：${bucket.archetypes.map((a) => a.name).join('、')}。${matchHint}`;
+    }
+
+    // read
+    const fmtZh = format === 'wild' ? '狂野' : format === 'twist' ? '幻变' : '标准';
+    if (!heroClass) {
+      const all = this.archetypes.listAll();
+      if (!all.length) {
+        return '还没有存入任何对手主流卡组情报。对局时请先用 browser_search 搜索当下版本该职业主流卡组，再调用 hearthstone_matchup(action="save") 保存。';
+      }
+      return `已有主流卡组缓存：\n${all.map((b) => `- ${b.format} · ${b.heroClass}（${b.archetypes.map((a) => a.name).join('、')} · 存于 ${b.savedAt.slice(0, 10)}）`).join('\n')}`;
+    }
+
+    const bucket = this.archetypes.read(format, heroClass);
+    if (!bucket || !bucket.archetypes.length) {
+      return `本地暂无【${fmtZh} · ${heroClass}】的主流卡组缓存。\n`
+        + `建议立刻用 browser_search 搜「炉石传说 ${fmtZh} ${heroClass} 主流卡组」或「HSReplay hearthstone ${format} ${heroClass} decks」，`
+        + `提炼 2-5 套常见构筑（name / coreCards / threats / strategy）并用 hearthstone_matchup(action="save", format="${format}", heroClass="${heroClass}", archetypes=[...]) 存入本地。`;
+    }
+
+    const savedMs = Date.parse(bucket.savedAt);
+    const stale = !Number.isFinite(savedMs) || this.nowMs() - savedMs > 7 * 24 * 60 * 60 * 1000;
+    const lines = [`【${fmtZh} · ${heroClass} 主流卡组】存于 ${bucket.savedAt.slice(0, 10)}${stale ? '（⚠ 已超过 7 天，建议重搜刷新）' : ''}`];
+    for (const a of bucket.archetypes) {
+      lines.push(`- ${a.name}：特征牌[${a.coreCards.join('、')}]${a.threats.length ? ` · 提防[${a.threats.join('、')}]` : ''}${a.strategy ? ` · ${a.strategy}` : ''}`);
+    }
+    const tracker = snapshot ? this.currentTracker(snapshot) : null;
+    if (snapshot && tracker && snapshot.opponent.heroClass === heroClass) {
+      const m = this.archetypes.match(format, heroClass, tracker.opponent.initialPlayed.map((x) => x.name), this.nowMs());
+      lines.push('', renderMatchupSummary(m, heroClass));
+    }
+    return lines.join('\n');
+  }
+
   /* ---------- 竞技场打法笔记 ---------- */
 
   private loadArenaMeta(): void {
@@ -2319,6 +2752,20 @@ export class HearthstoneWorld implements World {
         handler: async (args, ctx) => ({ text: await this.adviceReceipt(args.full !== false, ctx?.signal) }),
       },
       {
+        name: TRACKER_DECL.name,
+        description: TRACKER_DECL.description,
+        parameters: TRACKER_DECL.parameters,
+        tags: TRACKER_DECL.tags,
+        handler: async (args) => ({ text: this.trackerReceipt(args) }),
+      },
+      {
+        name: MATCHUP_DECL.name,
+        description: MATCHUP_DECL.description,
+        parameters: MATCHUP_DECL.parameters,
+        tags: MATCHUP_DECL.tags,
+        handler: async (args) => ({ text: this.matchupReceipt(args) }),
+      },
+      {
         name: DRAFT_DECL.name,
         description: DRAFT_DECL.description,
         parameters: DRAFT_DECL.parameters,
@@ -2399,10 +2846,13 @@ export class HearthstoneWorld implements World {
       ? `\n最近:\n${actions.map((a) => `  第 ${a.turn} 回合 · ${a.text}`).join('\n')}`
       : '';
     const meta = snapshot.ended ? '这局已结束。' : snapshot.isMyTurn ? '现在轮到我。' : '现在轮到对手。';
+    const progressLine = snapshot.meta?.gameType && snapshot.meta.gameType !== 'UNKNOWN'
+      ? `模式与进度:${this.progress.briefForMeta(snapshot.meta)}\n`
+      : '';
     // 日志停写时先把这件事摆在最前面:下面的数字全是残影,不能当现在用
     const stalled = this.logStalled();
     const head = stalled ? `${stalled}\n\n` : '';
-    return `${head}${renderSnapshot(snapshot)}\n${lethalText(snapshot)}\n${meta}${tailText}`;
+    return `${head}${progressLine}${renderSnapshot(snapshot)}\n${lethalText(snapshot)}\n${meta}${tailText}`;
   }
 
   private llmConfig(): LlmConfig | null {
@@ -2461,8 +2911,9 @@ export class HearthstoneWorld implements World {
       '如果关键信息不足(比如对手手牌看不到),就直说这一点,不要编。',
     ].join('');
 
+    const extra = this.adviceExtra(snapshot);
     const user = [
-      buildModelPrompt(snapshot, { keepCards: this.cfg.keepCards }),
+      buildModelPrompt(snapshot, { keepCards: this.cfg.keepCards, ...extra }),
       '',
       '机械算出的候选(仅供参考,可以推翻):',
       advice.candidates.map((c) => `- ${c}`).join('\n'),
@@ -2486,7 +2937,8 @@ export class HearthstoneWorld implements World {
     if (snapshot.ended) {
       return '这局已经结束了,没有「这回合打什么」。要看刚才打得怎么样,用 hearthstone_last_game。';
     }
-    const advice = advise(snapshot, { keepCards: this.cfg.keepCards });
+    const extra = this.adviceExtra(snapshot);
+    const advice = advise(snapshot, { keepCards: this.cfg.keepCards, ...extra });
     if (!full) advice.hand = advice.hand.filter((c) => c.playable);
     const head = snapshot.isMyTurn
       ? ''
@@ -2552,11 +3004,26 @@ export class HearthstoneWorld implements World {
     // 竞技场牌组常驻可见 —— 选牌时最需要「我已经有什么、还缺什么」,
     // 而把它放进环境变量,她每一轮都看得到,不用为看一眼曲线去调一次工具。
     const deck = deckBrief(this.arenaDeck);
+    const progBrief = this.formatProgressPanelView(snapshot).brief;
+    const trackerText = (() => {
+      if (snapshot) {
+        const t = this.currentTracker(snapshot);
+        if (t) {
+          const m = this.currentMatchup(snapshot, t);
+          return renderTrackerForPrompt(t, { progressBrief: progBrief, matchup: m });
+        }
+      }
+      const deckTip = this.importedDeck
+        ? `已导入卡组「${this.importedDeck.name}」（${this.importedDeck.deck.heroClass || '职业未知'} · ${this.importedDeck.deck.totalCards} 张）。`
+        : '未导入天梯卡组代码（无局内牌库明细，可先导入代码或面板校准段位）。';
+      return `${progBrief}\n${deckTip}`;
+    })();
     return {
       'hs.status': status,
       'hs.game': game,
       'hs.mode': this.cfg.mode === 'quiet' ? t.modeQuiet : t.modeNormal,
       'hs.deck': deck ?? '没在选牌（牌组是空的）。竞技场开始选牌时用 hearthstone_draft 记牌，记下的牌会显示在这里。',
+      'hs.tracker': trackerText,
       'hs.rules': RULES_BRIEF,
       // 整篇塞进去，不是给她一个「去查」的入口 —— 她开口之前立场就得在。
       // 空档案会返回一句「还没长出来」，免得她以为读失败了然后开始编。
@@ -2744,11 +3211,46 @@ export class HearthstoneWorld implements World {
     if (method === 'auto') return this.panelAuto(String(args[0] ?? ''), Boolean(args[1]));
     if (method === 'voice') return this.panelVoice(String(args[0] ?? ''));
     if (method === 'selfplay') return this.panelSelfPlay();
+    if (method === 'importDeck') {
+      const res = this.applyImportDeck(String(args[0] ?? ''), typeof args[1] === 'string' ? args[1] : '');
+      return { ok: res.ok, ...(res.ok ? {} : { error: res.error }), ...this.panelPayload() };
+    }
+    if (method === 'clearDeck') {
+      this.clearImportedDeck();
+      return { ok: true, ...this.panelPayload() };
+    }
+    if (method === 'setRank') {
+      const fmtRaw = String(args[0] ?? '');
+      const fmt: LadderFormat = fmtRaw === 'wild' || fmtRaw === 'twist' ? fmtRaw : 'standard';
+      const rankInput = String(args[1] ?? '');
+      const starBonus = typeof args[2] === 'number' ? args[2] : undefined;
+      const res = this.progress.setRank(fmt, rankInput, starBonus, nowIso());
+      return { ok: res.ok, ...(res.error ? { error: res.error } : {}), ...this.panelPayload() };
+    }
+    if (method === 'setArena') {
+      const wins = Number(args[0] ?? 0);
+      const losses = Number(args[1] ?? 0);
+      const mRaw = String(args[2] ?? '');
+      const mode: ArenaMode = mRaw === 'arena' ? 'arena' : 'underground';
+      const snapshot = this.lastSnapshot ?? this.parser.snapshot();
+      this.progress.calibrateArena(wins, losses, mode, snapshot?.me.heroClass || '', nowIso());
+      return { ok: true, ...this.panelPayload() };
+    }
+    if (method === 'resetArena') {
+      const mRaw = String(args[0] ?? '');
+      const mode: ArenaMode = mRaw === 'arena' ? 'arena' : 'underground';
+      const snapshot = this.lastSnapshot ?? this.parser.snapshot();
+      this.progress.resetArenaRun(mode, snapshot?.me.heroClass || '', nowIso());
+      return { ok: true, ...this.panelPayload() };
+    }
     throw new Error(`面板 main 没有这个方法:${method}`);
   }
 
   private panelPayload(): { status: PanelStatus; advice: PanelAdvice | null; figure: { status: string; message: string } | null } {
     const snapshot = this.lastSnapshot ?? this.parser.snapshot();
+    const modeLabel = snapshot?.meta?.gameType && snapshot.meta.gameType !== 'UNKNOWN'
+      ? formatModeLabel(snapshot.meta)
+      : undefined;
     const status = panelStatus(snapshot, this.status, {
       mode: this.cfg.mode,
       speakTurns: this.cfg.speakTurns,
@@ -2757,13 +3259,17 @@ export class HearthstoneWorld implements World {
       voice: this.cfg.voice,
       // 每 2 秒读一次路径判断，比读全文便宜；面板要的是「那边到底有没有东西」。
       hisReady: existsSync(hisStylePath(this.styleDir)),
+    }, {
+      modeLabel,
+      progress: this.formatProgressPanelView(snapshot),
+      tracker: this.formatTrackerPanelView(snapshot),
     });
     // 感想栏挂在状态外面：它不属于「这局打得怎么样」，是跨对局的东西。
     // 只取 3 条 —— 面板是「一眼看」，不是日志页。
     status.thoughts = readThoughts(this.diaryDir(), 3);
     return {
       status,
-      advice: panelAdvice(snapshot, this.cfg.keepCards),
+      advice: panelAdvice(snapshot, this.cfg.keepCards, this.adviceExtra(snapshot)),
       /* 面板上要有个「装形象包」的按钮，就得知道现在是什么状态。 */
       figure: this.figurePack
         ? { status: this.figurePack.status, message: this.figurePack.message }
@@ -3041,6 +3547,27 @@ export class HearthstoneWorld implements World {
           return zh ? '已清除打法立场与习惯档案。' : 'Play-style and habit profiles cleared.';
         },
       },
+      {
+        key: 'hearthstone-tracker',
+        label: zh ? '记牌器、天梯竞技场进度与对手卡组库' : 'Deck tracker, rank/arena progress & archetype intel',
+        kind: 'disk',
+        location: this.opts.dataDir,
+        note: zh
+          ? '清空手动导入的天梯卡组代码、天梯段位/竞技场胜负进度记录及联网缓存的对手主流卡组库。'
+          : 'Clears the imported deck code, ranked/arena progress record, and cached opponent meta archetypes.',
+        stat: () => safeStat(() => {
+          const deckText = this.importedDeck ? (zh ? `已导卡组「${this.importedDeck.name}」` : 'Deck imported') : (zh ? '无导入卡组' : 'No deck');
+          const archCount = this.archetypes.listAll().length;
+          return zh ? `${deckText} · ${archCount} 个职业情报缓存` : `${deckText} · ${archCount} class intel caches`;
+        }),
+        clear: () => {
+          unlinkManyWithRollback([this.deckPath, this.progress.path(), this.archetypes.path()]);
+          this.importedDeck = null;
+          this.progress.clearAll();
+          this.archetypes.clearAll();
+          return zh ? '已清空导入卡组、天梯/竞技场进度与对手卡组情报缓存。' : 'Tracker deck, progress and matchup cache cleared.';
+        },
+      },
     ];
   }
 
@@ -3110,6 +3637,7 @@ export class HearthstoneWorld implements World {
           { name: 'hs.game', description: t.varGame, multiline: true },
           { name: 'hs.mode', description: t.varMode },
           { name: 'hs.deck', description: '当前竞技场牌组的构成与曲线缺口；没在选牌时说明如何开始记录。', multiline: true },
+          { name: 'hs.tracker', description: '当前模式与天梯/竞技场战绩、记牌器牌库剩余/对手已交牌及主流卡组匹配线索。', multiline: true },
           { name: 'hs.rules', description: '炉石核心规则摘要——判断一条建议在规则上站不站得住脚时用。', multiline: true },
         ],
       }],

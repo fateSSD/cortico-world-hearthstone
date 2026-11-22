@@ -8,7 +8,7 @@
  * 非自动模式(mode=quiet)下,这个按钮就是唯一的问法 —— 他不用再去聊天框打字。
  */
 import type { GameSnapshot } from './parser.ts';
-import { briefAdvice } from './advice.ts';
+import { briefAdvice, type AdviceOptions } from './advice.ts';
 
 /** 面板要的那一份建议。字段少而全:kind 决定配色,face 给她换成同一张脸。 */
 /** 日志读到哪里了。和 world.ts 的 Phase 同一套值 —— 面板据此决定画什么。 */
@@ -39,6 +39,48 @@ export interface PanelFoe extends PanelSide {
   minions: number;
 }
 
+export interface PanelProgressView {
+  brief: string;
+  ladderFormat: 'standard' | 'wild' | 'twist';
+  ladderText: string;
+  arenaMode: 'arena' | 'underground';
+  arenaText: string;
+}
+
+export interface PanelTrackerView {
+  inGame: boolean;
+  hasImportedDeck?: boolean;
+  deckSource: 'imported' | 'arena' | 'none';
+  deckName: string;
+  deckMismatch: boolean;
+  myRemainingCount: number;
+  myRemaining: {
+    cardId: string;
+    name: string;
+    cost: number;
+    left: number;
+    total: number;
+    prob: number;
+    extraCreated?: boolean;
+  }[];
+  myPlayed: { name: string; cost: number; count: number }[];
+  oppPlayed: { name: string; cost: number; count: number; created: boolean }[];
+  oppHand: {
+    slot: number;
+    enteredTurn: number;
+    age: number;
+    created: boolean;
+    isCoin: boolean;
+    revealedName?: string;
+    creatorName?: string;
+  }[];
+  oppSecrets: number;
+  hasDuplicates?: boolean;
+  remainingBurstDamage: number;
+  remainingBurstCount: number;
+  matchupBrief?: string;
+}
+
 export interface PanelStatus {
   phase: PanelPhase;
   /** 一句话说清现在能不能看见对局。面板上没有别的地方放这句话。 */
@@ -53,30 +95,15 @@ export interface PanelStatus {
     speakTurns: boolean;
     speakAlerts: boolean;
   };
-  /**
-   * 现在按谁的习惯解说。
-   *
-   * 单独一个字段而不是塞进 `auto`：那三个是「她开不开口」，
-   * 这个是「她站在谁的立场上」—— 关掉自动开口（quiet）之后这一项照样有用。
-   */
   voice: 'mine' | 'his';
-  /**
-   * 「他那边」有没有东西可读。
-   *
-   * 注意它说的是**他那一份在不在**，不是「当前立场有没有内容」——
-   * 一开始我写成后者，结果在当前处于 `mine` 时它恒为 true，
-   * 前端拿它给「你的」按钮做提示，正好把「那边是空的」说成了「有」。
-   * 没打过局就没有档案，这时她按「他习惯怎么打」只能老实说不知道，
-   * 面板要把这件事露出来 —— 否则切过去一句话没变，看着像按钮坏了。
-   */
   hisReady: boolean;
-  /**
-   * 她最近想到的几条（新的在前）。
-   *
-   * 面板上只显示 3 条：这是「她这两天在琢磨什么」，不是日志。
-   * 想看全部就打开日记目录 —— 那儿一份不少。
-   */
   thoughts?: { at: string; text: string; where?: string }[];
+  /** 当前模式短标签（标准/狂野/地下竞技场等）。 */
+  modeLabel?: string;
+  /** 天梯段位与竞技场战绩进度。 */
+  progress?: PanelProgressView;
+  /** 记牌器快照。 */
+  tracker?: PanelTrackerView;
 }
 
 export interface PanelCfg {
@@ -93,9 +120,13 @@ export interface PanelCfg {
  * 面板建议。和回合事件用同一个 `briefAdvice` ——
  * 两处各写一套的话,「点按钮看到的」和「她自己说的」会打架。
  */
-export function panelAdvice(snapshot: GameSnapshot | null, keepCards: string): PanelAdvice | null {
+export function panelAdvice(
+  snapshot: GameSnapshot | null,
+  keepCards: string,
+  extra?: Pick<AdviceOptions, 'tracker' | 'matchupHint'>,
+): PanelAdvice | null {
   if (!snapshot || snapshot.ended) return null;
-  const a = briefAdvice(snapshot, { keepCards });
+  const a = briefAdvice(snapshot, { keepCards, ...extra });
   return { kind: a.kind, text: a.text, face: a.face ?? null };
 }
 
@@ -103,6 +134,7 @@ export function panelStatus(
   snapshot: GameSnapshot | null,
   watch: { phase: PanelPhase; path: string | null; note: string },
   cfg: PanelCfg,
+  extra?: { modeLabel?: string; progress?: PanelProgressView; tracker?: PanelTrackerView },
 ): PanelStatus {
   const auto = { mode: cfg.mode, speakTurns: cfg.speakTurns, speakAlerts: cfg.speakAlerts };
   const base: PanelStatus = {
@@ -116,6 +148,9 @@ export function panelStatus(
     auto,
     voice: cfg.voice,
     hisReady: Boolean(cfg.hisReady),
+    ...(extra?.modeLabel ? { modeLabel: extra.modeLabel } : {}),
+    ...(extra?.progress ? { progress: extra.progress } : {}),
+    ...(extra?.tracker ? { tracker: extra.tracker } : {}),
   };
   if (!snapshot) return base;
 

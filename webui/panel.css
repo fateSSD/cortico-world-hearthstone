@@ -393,3 +393,244 @@
   opacity: 0.5;
   cursor: default;
 }
+
+/* ---------- 模式战绩与校准 / 记牌器 ---------- */
+
+.hs-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--sheet-2);
+  border: 1px solid var(--line);
+}
+
+.hs-progress-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hs-progress-brief {
+  font-size: 12px;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.hs-mini-btn {
+  appearance: none;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line-strong);
+  background: var(--sheet);
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.hs-mini-btn:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+
+.hs-mini-btn.is-primary {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-color: transparent;
+}
+
+.hs-mini-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.hs-prog-form,
+.hs-deck-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--line);
+}
+
+.hs-form-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.hs-input {
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--line-strong);
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+}
+
+.hs-rank-input {
+  flex: 1 1 110px;
+  min-width: 90px;
+}
+
+.hs-num-input {
+  width: 44px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hs-deck-ta {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font-family: inherit;
+}
+
+.hs-form-unit {
+  font-size: 11.5px;
+  color: var(--ink-dim);
+}
+
+.hs-form-msg {
+  font-size: 11.5px;
+  color: var(--ink-soft);
+}
+
+.hs-form-msg.is-ok { color: var(--ok); }
+.hs-form-msg.is-err { color: var(--danger); }
+
+.hs-tracker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: var(--sheet-2);
+  border: 1px solid var(--line);
+}
+
+.hs-tracker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.hs-tracker-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hs-tracker-actions {
+  display: inline-flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.hs-tracker-matchup {
+  padding: 4px 7px;
+  border-radius: 6px;
+  background: var(--sheet);
+  border-left: 2px solid var(--warn);
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  line-height: 1.4;
+}
+
+.hs-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 4px;
+}
+
+.hs-tab {
+  appearance: none;
+  flex: 1 1 0;
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-dim);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.hs-tab.is-on {
+  background: var(--sheet);
+  border-color: var(--line-strong);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.hs-tracker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 210px;
+  overflow-y: auto;
+}
+
+.hs-tr-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hs-tr-row:nth-child(odd) {
+  background: var(--sheet);
+}
+
+.hs-tr-row.is-created {
+  color: var(--ink-soft);
+}
+
+.hs-tr-cost {
+  flex: 0 0 18px;
+  text-align: center;
+  font-weight: 600;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.hs-tr-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hs-tr-right {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  color: var(--ink-dim);
+}
+
+.hs-tr-hint,
+.hs-tr-secret {
+  font-size: 11.5px;
+  color: var(--ink-dim);
+  padding: 2px 4px;
+}
+
+.hs-tr-secret {
+  color: var(--warn);
+  font-weight: 600;
+}

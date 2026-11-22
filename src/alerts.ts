@@ -411,28 +411,27 @@ export function turnText(now: GameSnapshot): string {
 }
 
 /** 开局时那句事实:双方职业、先后手。 */
-export function startText(now: GameSnapshot): string {
+export function startText(now: GameSnapshot, extra?: string): string {
   const me = now.me;
   const foe = now.opponent;
   // 先手看 `firstPlayerId`,不看 `activePlayerId` —— 后者是「现在轮到谁」,
   // 开局那一刻两个概念还差一步(实测后手开局被说成「我先手」)。
   const firstId = now.firstPlayerId || now.activePlayerId;
   const first = firstId === me.playerId ? '我先手' : '对手先手';
-  return `对局开始:我是 ${me.heroClass || '未知职业'},对手是 ${foe.heroClass || '未知职业'},${first}。`;
+  const tail = extra ? `（${extra}）` : '';
+  return `对局开始:我是 ${me.heroClass || '未知职业'},对手是 ${foe.heroClass || '未知职业'},${first}${tail}。`;
 }
 
 /** 结束时那句事实。 */
-export function endText(now: GameSnapshot): string {
+export function endText(now: GameSnapshot, extra?: string): string {
   const me = now.me;
   const foe = now.opponent;
   const label = now.result === 'won' ? '赢了' : now.result === 'lost' ? '输了' : now.result === 'tied' ? '平局' : '结束';
-  // 赢了、对手却不是 0 血 —— 那是他认输/退了,不是被封脸打死。
-  // 不说明白的话,这句话读起来像自相矛盾:赢了,对手还有 17 血?
-  // (2026-10-28 实测:末回合对手 9 血 8 甲,日志里 PLAYSTATE=LOST,血量全程没归零。)
   const foeWalked = now.result === 'won' && combined(foe) > 0;
   const meWalked = now.result === 'lost' && combined(me) > 0;
   const note = foeWalked ? '(他没打完就退了)' : meWalked ? '(我认输了)' : '';
-  return `这局${label}:第 ${now.turn} 回合,我 ${combined(me)} 血 / 对手 ${combined(foe)} 血${note}。`;
+  const tail = extra ? ` · ${extra}` : '';
+  return `这局${label}:第 ${now.turn} 回合,我 ${combined(me)} 血 / 对手 ${combined(foe)} 血${note}${tail}。`;
 }
 
 /**
@@ -478,7 +477,11 @@ export function lethalText(now: GameSnapshot): string {
 
   const parts: string[] = [];
   if (taunts.length) {
-    parts.push(`能打出的攻击 ${plan.swingsTotal} → 过墙后剩 ${plan.faceAtk}`);
+    // 「过墙后剩 N」在清场组合下会读成「墙没挡住」。那种走法根本不靠撞，
+    // 说的是「先把墙连人一起扫掉，N 点全打脸」—— 两句话对应两种打法。
+    parts.push(plan.viaClear
+      ? `能打出的攻击 ${plan.swingsTotal} → 先清场,${plan.faceAtk} 全打脸`
+      : `能打出的攻击 ${plan.swingsTotal} → 过墙后剩 ${plan.faceAtk}`);
   } else {
     parts.push(`场面 ${plan.faceAtk}`);
   }
@@ -491,6 +494,9 @@ export function lethalText(now: GameSnapshot): string {
   // 战吼也要报(2026-11-19)。它是 total 的一部分,不写出来就成了「账面加起来对不上总数」
   if (plan.battlecryDamage > 0) {
     parts.push(`战吼 ${plan.battlecryDamage}(${plan.battlecries.map((x) => `${x.name} ${x.cost}费${x.damage}伤`).join(' + ')})`);
+  }
+  if (plan.chargeDamage > 0) {
+    parts.push(`冲锋 ${plan.chargeDamage}(${plan.charges.map((x) => `${x.name} ${x.cost}费${x.damage}伤`).join(' + ')})`);
   }
 
   const head = `斩杀线:${parts.join(' + ')} = ${plan.total},对手 ${target} 血(含护甲)`;
@@ -532,9 +538,7 @@ export function lethalText(now: GameSnapshot): string {
     const notes: string[] = [];
     if (taunts.length) notes.push('过墙只按现有攻击力算,没考虑先用法术解墙');
     if (plan.buffDamage > 0) notes.push('buff 假设加在能攻击的随从身上');
-    // 战吼已经从「没算」里摘出去(2026-11-19):确定打得出的那些进了 total,
-    // 只剩「前提不满足/判不了」的那部分没算 —— 这一句不能再笼统地把战吼整个划掉。
-    notes.push('冲锋、随从亡语、法术伤害加成、无视嘲讽都没算;战吼只算了前提确定满足的');
+    notes.push('随从亡语等非确定来源未算;战吼/冲锋/法强已算入确定部分');
     lines.push(`注意:${notes.join(';')}。`);
   }
 

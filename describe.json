@@ -40,6 +40,159 @@
       }
     },
     {
+      "name": "hearthstone_tracker",
+      "description": "Deck tracker and ranked/arena progress tool. Call with action=\"status\" (default) during a game to inspect exact remaining cards and draw probabilities in your deck (when a deck code is imported or arena draft was recorded), whether no duplicates remain for Reno/highlander triggers, cards the opponent has played (initial vs. created), opponent hand card ages/created sources, secrets, and current ranked/arena win-loss record. Also supports importing a Blizzard deck code (action=\"import_deck\"), clearing it (\"clear_deck\"), calibrating ranked tier (\"set_rank\", e.g. \"钻5 2星\" or \"传说 #1200\"), or calibrating/resetting arena wins and losses (\"set_arena\" / \"reset_arena\").",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "status",
+              "import_deck",
+              "clear_deck",
+              "set_rank",
+              "set_arena",
+              "reset_arena"
+            ],
+            "description": "Operation to perform. Defaults to status."
+          },
+          "deckCode": {
+            "type": "string",
+            "description": "For import_deck: Blizzard deckstring or full in-game copied deck text."
+          },
+          "deckName": {
+            "type": "string",
+            "description": "Optional label for the imported deck."
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "standard",
+              "wild",
+              "twist"
+            ],
+            "description": "Ranked format for set_rank (defaults to standard or current match format)."
+          },
+          "rank": {
+            "type": "string",
+            "description": "For set_rank: current tier and stars, e.g. \"钻5 2星\", \"白金10\", or \"传说 #800\". Empty clears it."
+          },
+          "starBonus": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 11,
+            "description": "Optional season star bonus multiplier (1-11)."
+          },
+          "wins": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 12,
+            "description": "For set_arena: current arena wins."
+          },
+          "losses": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3,
+            "description": "For set_arena: current arena losses."
+          },
+          "arenaMode": {
+            "type": "string",
+            "enum": [
+              "arena",
+              "underground"
+            ],
+            "description": "Arena mode: arena (5W/2L) or underground (12W/3L)."
+          }
+        }
+      },
+      "tags": [
+        "read",
+        "write"
+      ],
+      "summary": {
+        "zh": "记牌器与天梯/竞技场战绩：看剩余牌库概率/宇宙、对手已交牌与手牌滞留、导入卡组代码或校准段位/胜负。",
+        "en": "Deck tracker and ranked/arena progress: remaining deck odds, opponent played/hand tracking, deck code import, and rank/arena calibration."
+      }
+    },
+    {
+      "name": "hearthstone_matchup",
+      "description": "Read or update local constructed ladder archetype intel for an opponent class (e.g. what meta decks that class plays right now, their signature core cards, and key removals/finishers to play around). Workflow: call with action=\"read\" when a ranked game starts against a class. If no fresh cache (within 7 days) exists, use browser_search to look up current Hearthstone meta decks for that format and class (e.g. \"炉石传说 标准 <职业> 主流卡组\" or \"HSReplay/Vicious Syndicate <class>\"), distil 2-5 archetypes with coreCards and threats, and save them here with action=\"save\". Subsequent turns automatically match the opponent's non-created plays against these archetypes.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "read",
+              "save",
+              "clear"
+            ],
+            "description": "read (default), save, or clear cached archetypes for this format+class."
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "standard",
+              "wild",
+              "twist"
+            ],
+            "description": "Ladder format (defaults to current match format or standard)."
+          },
+          "heroClass": {
+            "type": "string",
+            "description": "Opponent hero class in Chinese, e.g. 法师 / 潜行者 / 战士 (defaults to current opponent)."
+          },
+          "archetypes": {
+            "type": "array",
+            "description": "For save: 1-8 mainstream meta archetypes for that class.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Archetype name, e.g. 节奏贼."
+                },
+                "coreCards": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "3-10 signature Chinese card names used to identify this deck."
+                },
+                "threats": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Key board clears, finishers, or swing cards not yet played."
+                },
+                "strategy": {
+                  "type": "string",
+                  "description": "1 short sentence on how to play against it."
+                }
+              },
+              "required": [
+                "name",
+                "coreCards"
+              ]
+            }
+          }
+        }
+      },
+      "tags": [
+        "read",
+        "write"
+      ],
+      "summary": {
+        "zh": "天梯对手主流卡组库：读取或写入联网查到的对手职业主流构筑，对局中自动识别并提示未交出的关键牌。",
+        "en": "Read or store meta archetypes for opponent classes so the companion can recognise decks and pending threats."
+      }
+    },
+    {
       "name": "hearthstone_draft",
       "description": "Arena draft help. Pass the two or three cards offered as `options` (Chinese card names) and it returns each one parsed from the card table (cost, stats, effect summary), a heuristic score for each, the current drafted deck's curve and gaps, and a mechanical ranking. Pass `pick` to record the card actually taken, `reset` to start a new run. Arena draft choices are NOT in the game log, so the cards have to come from the person — ask them to read the three off the screen.",
       "parameters": {

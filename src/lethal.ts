@@ -16,9 +16,12 @@
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import type { GameSnapshot, MinionView, SideState } from './parser.ts';
+import type { DarkGiftInfo, GameSnapshot, MinionView, SideState } from './parser.ts';
 import { damageSpellsInHand, type DamageCard } from './damage.ts';
-import { battlecryState, cardCostOf, cardEffects, cardName, cardNote, passiveOf } from './effects.ts';
+import {
+  battlecryState, cardBody, cardCostOf, cardEffects, cardName, cardNote,
+  cardTypeOf, darkGiftEffects, LEVELER_NOTE_RE, passiveOf, resolveHandAoeCard, type BattlecryContext,
+} from './effects.ts';
 
 /** 目标的称呼:日志名 → 卡表 → 「未知随从」。别把内部 id 拼进她念的句子。 */
 const targetLabel = (m: { name?: string; cardId?: string }): string =>
@@ -79,65 +82,77 @@ export function buffsInHand(hand: readonly { cardId: string }[]): BuffCard[] {
   return out;
 }
 
-/** 一张打出去就掉血的战吼随从。 */
+/** 一张打出去就掉血的战吼（或已激活连击）随从。 */
 export interface BattlecryCard {
   cardId: string;
   name: string;
   cost: number;
-  /** 这一张的战吼伤害(打脸部分)。 */
+  /** 这一张的战吼/连击伤害(打脸部分)。 */
   damage: number;
+  /** 是否来自黑暗之赐双倍战吼或连击。 */
+  tag?: string;
+}
+
+/** 一张当回合就能冲锋打脸的随从（自带冲锋或黑暗之赐冲锋）。 */
+export interface ChargeCard {
+  cardId: string;
+  name: string;
+  cost: number;
+  damage: number;
+  reason?: string;
+}
+
+type LethalHandCard = {
+  id?: number;
+  cardId: string;
+  cost?: number;
+  name?: string;
+  darkGift?: DarkGiftInfo;
+};
+
+function isValidHandCost(card: { cardId: string; cost?: number }): boolean {
+  if (typeof card.cost !== 'number') return false;
+  if (card.cost === 0 && (cardCostOf(card.cardId) ?? 0) > 0) return false;
+  return true;
+}
+
+function makeBattlecryCtx(me: SideState, deckHasDuplicates?: boolean): BattlecryContext {
+  const hand = me.handCards ?? [];
+  return {
+    weapon: !!me.weapon,
+    minionCount: me.minions.length,
+    auras: me.auras?.length,
+    imbueCount: me.imbueCount,
+    hasDarkGiftInHand: hand.some((c) => Boolean(c.darkGift)),
+    deckHasDuplicates,
+  };
 }
 
 /**
  * 手牌里「打出去就能打到脸」的战吼伤害。
- *
- * 分三档过滤,标准都是「宁可说少」:
- *
- * 1. **前提必须确定满足**(`battlecryState === 'ready'`)。判不了或明确不满足的,
- *    一律不进这个表 —— 它会在建议里单独写一句「要满足 X 才有 N 点」。
- * 2. **落点不确定的不算**。两类:只能打随从的(「伤害2群随机随从」),
- *    和随机分配的(「伤害1随机」「伤害3群随机」)—— 后者的下界是 0 点,
- *    拿它当斩杀线就是在赌。判据看卡面摘要,和 `damage.ts` 收直伤法术的口径一致。
- * 3. **同名多张逐张算**。这是 2026-11-19 那次漏斩杀的关键:
- *    手上两张时间流具象(各 3 伤)、8 水晶正好两张都打得出、对面 6 血,
- *    而当时的实现只取「最大的一张」,于是永远只报 3 点。
- *    炉石里同名随从本来就能带两张,不累加等于系统性地少算一半。
- *
- * 不算的部分:战吼按**牌面**伤害算 —— 场上的法术伤害加成其实也会落在它身上,
- * 但这里不加(宁可说少,而且法强已经在那句 caveat 里说明了);
- * 打出去的随从当回合不能攻击(无冲锋),所以不额外加场攻。
  */
 export function battlecriesInHand(
-  hand: readonly { cardId: string; cost?: number; name?: string }[],
-  ctx: { weapon: boolean; minionCount: number; auras?: number },
+  hand: readonly LethalHandCard[],
+  ctx: BattlecryContext,
 ): BattlecryCard[] {
   const out: BattlecryCard[] = [];
   for (const card of hand) {
     if (!card.cardId) continue;
-    // 费用只能来自实体(手牌被减费时卡表那个数是错的);拿不到就不猜
-    if (typeof card.cost !== 'number') continue;
-    /*
-     * 读到 0 费、牌面却不是 0 费 —— 那是实体还没 dump 完(`COST` 缺省 0),
-     * 不是真的免费。拿它进背包等于白送伤害,这里直接跳过。
-     */
-    if (card.cost === 0 && (cardCostOf(card.cardId) ?? 0) > 0) continue;
+    if (!isValidHandCost(card)) continue;
     const fx = cardEffects(card.cardId);
     if (fx.battlecry <= 0) continue;
     if (battlecryState(fx, ctx) !== 'ready') continue;
     const note = cardNote(card.cardId);
-    /*
-     * 「伤害3群」= 对敌方全体,确定打到脸;下面两类一律不算:
-     *   · 「伤害2群随机随从」—— 只能打随从
-     *   · 「伤害1随机」「伤害3群随机」—— 落点由随机决定,下界是 0 点
-     * 随机那条和一些老代码的取舍一致(见 damage.ts 开头的口径:群体、随机、多段一律不收)。
-     */
     if (/随机/.test(note)) continue;
     if (new RegExp(`伤害\\s*${fx.battlecry}[^\\s]*随从`).test(note)) continue;
+    const dg = card.darkGift ? darkGiftEffects(card.darkGift.cardId, card.darkGift.note) : null;
+    const mult = dg?.doubleBattlecry ? 2 : 1;
     out.push({
       cardId: card.cardId,
       name: card.name || cardName(card.cardId),
-      cost: Math.max(0, card.cost),
-      damage: fx.battlecry,
+      cost: Math.max(0, card.cost!),
+      damage: fx.battlecry * mult,
+      ...(mult > 1 ? { tag: '双倍战吼' } : {}),
     });
   }
   return out;
@@ -212,7 +227,10 @@ export function swingUnits(s: SideState): SwingUnit[] {
     if (m.windfury) out.push({ atk: m.atk, poisonous: m.poisonous });
   }
   const hero = heroSwing(s);
-  if (hero > 0) out.push({ atk: hero, poisonous: false });
+  if (hero > 0) {
+    out.push({ atk: hero, poisonous: false });
+    if (s.heroWindfury) out.push({ atk: hero, poisonous: false });
+  }
   return out;
 }
 
@@ -303,21 +321,26 @@ export interface LethalPlan {
   faceAtk: number;
   /** 手牌直伤合计。 */
   spellDamage: number;
-  /** buff 加的攻击力合计。 */
+  /** buff 加的攻击力合计（含磁力）。 */
   buffDamage: number;
   /**
-   * 手牌战吼能打到脸的伤害合计。
-   *
-   * 2026-11-19 补。原来这一项根本不存在,战吼只在 caveats 里写一句「没算进去」——
-   * 于是「8 费两张时间流具象、各 3 伤、对面 6 血」这种标准斩杀被算成「差 5」。
+   * 手牌战吼（及已激活的随从连击直伤）能打到脸的伤害合计。
    */
   battlecryDamage: number;
+  /** 手牌冲锋随从（或黑暗之赐冲锋）打到脸的伤害合计。 */
+  chargeDamage: number;
   /** 总共能打到脸的伤害。 */
   total: number;
+  /**
+   * `faceAtk` 是靠「先把场面扫掉」拿到的，不是靠随从撞墙。
+   */
+  viaClear: boolean;
   spells: DamageCard[];
   buffs: BuffCard[];
-  /** 用到的战吼随从(逐张,同名两张各一条)。 */
+  /** 用到的战吼/连击随从(逐张,同名两张各一条)。 */
   battlecries: BattlecryCard[];
+  /** 用到的冲锋随从(逐张)。 */
+  charges: ChargeCard[];
   /** 用掉了多少水晶。 */
   manaSpent: number;
   /** 用到的法术伤害加成。 */
@@ -326,158 +349,586 @@ export interface LethalPlan {
   caveats: string[];
 }
 
-/** 算这一回合的斩杀上限。 */
-export function planLethal(snapshot: GameSnapshot): LethalPlan {
-  const me = snapshot.me;
-  const foe = snapshot.opponent;
+/* ---------- 清场组合：先把对面全变成 1 血，再扫一遍 -------------- */
 
-  const units = swingUnits(me);
-  const swingsTotal = units.reduce((a, b) => a + b.atk, 0);
+export interface SweepPlan {
+  /** 变形牌 + 群伤的合计费用。 */
+  cost: number;
+  /** 变形牌在手牌中的下标。 */
+  levelerIndex: number;
+  /** 变形牌名（生而平等这类）。 */
+  leveler: string;
+  /** 群伤来源在手牌中的下标。 */
+  sweeperIndex: number;
+  /** 群伤来源名。 */
+  sweeper: string;
+  /** 群伤来源的 cardId —— 要从费用背包里排掉，不能重复计价。 */
+  sweeperId: string;
+  /** 群伤来源类型：战吼随从或群伤法术。 */
+  sweeperKind: 'battlecry' | 'spell';
+  /** 群伤来源自己的费用（回执里要单独报出来，不能拿总费用顶上）。 */
+  sweeperCost: number;
+  /** 对随从造成的清场群伤点数。 */
+  damage: number;
+  /** 同时能打到敌方英雄脸上的伤害（只打随从的群伤为 0）。 */
+  faceDamage: number;
+  /** 群伤是否会扫到我方随从。 */
+  hitsOwnMinions: boolean;
+  /** 群伤是否会打到我方英雄。 */
+  hitsOwnHero: boolean;
+  /** 对我方英雄造成的自伤点数（0 = 安全）。 */
+  selfHeroDamage: number;
+  /** 清场后我方实际存活下来能打脸的场攻（含武器/英雄 + 带圣盾活下来的随从）。 */
+  survivingFaceAtk: number;
+  /** 清场后场上是否还剩能攻击的存活随从（决定剩余费用里还能不能贴随从 buff）。 */
+  survivingMinionCanAttack: boolean;
+  /** 清场时顺带烧死的我方随从数量（所有非圣盾随从都会被变 1 血后扫死）。 */
+  ownLostCount: number;
+  /** 挡路的原因；`null` 表示这条路走得通。 */
+  blocked: string | null;
+}
 
-  // 场上随从提供的法术伤害加成:所有直伤数字都要加它
+function handCardEffectiveCost(card: LethalHandCard, fallbackCost?: number | null): number | null {
+  if (typeof card.cost === 'number') {
+    return isValidHandCost(card) ? Math.max(0, card.cost) : null;
+  }
+  if (typeof fallbackCost === 'number') return Math.max(0, fallbackCost);
+  const tableCost = cardCostOf(card.cardId);
+  return typeof tableCost === 'number' ? Math.max(0, tableCost) : null;
+}
+
+/**
+ * 手上有「全部随从变 1 血」+「群伤（战吼或法术）」时，能不能把对面的墙连人一起扫掉。
+ *
+ * 区分「只打敌方」与「敌我全打」：敌我全打时，变形牌会把己方随从也变 1 血，
+ * 非圣盾己方随从会一并阵亡，绝不把死尸算作 survivingFaceAtk。
+ */
+export function detectSweep(
+  me: SideState,
+  foe: SideState,
+  budget: number,
+  deckHasDuplicates?: boolean,
+): SweepPlan | null {
+  const taunts = foe.minions.filter((m) => m.taunt);
+  if (!taunts.length) return null;
+
+  const hand = (me.handCards ?? []) as LethalHandCard[];
+
+  // 变形牌：卡面写着「所有随从…生命值变为1」。必须是「所有」，单体变 1 血清不了场。
+  let levelerIdx = -1;
+  let levelerCost = 0;
+  for (let i = 0; i < hand.length; i += 1) {
+    const c = hand[i];
+    if (!c.cardId) continue;
+    const effCost = handCardEffectiveCost(c);
+    if (effCost === null || effCost > budget) continue;
+    if (LEVELER_NOTE_RE.test(cardNote(c.cardId))) {
+      levelerIdx = i;
+      levelerCost = effCost;
+      break;
+    }
+  }
+  if (levelerIdx < 0) return null;
+  const leveler = hand[levelerIdx];
+
+  const ctx = makeBattlecryCtx(me, deckHasDuplicates);
   const spellPower = me.spellPower ?? 0;
-  // 我方有没有「攻击无视嘲讽」的随从(如凯恩·日怒)。有的话,过墙这一步直接跳过 ——
-  // 但墙还在场上,下回合照样是威胁,所以只影响攻击能不能打到脸。
-  const ignoreTaunt = me.minions.some((m) => cardEffects(m.cardId).ignoreTaunt);
-  const taunts = ignoreTaunt ? [] : foe.minions.filter((m) => m.taunt);
-  const wall: WallResult = taunts.length
-    ? breachTaunts(units, taunts)
-    : { cleared: true, spent: 0, leftover: swingsTotal, steps: [] };
+  const boardSlotsFree = Math.max(0, 7 - me.minions.length);
+  const myEffHp = me.health + me.armor;
+  const heroAtkBase = heroSwing(me);
+  const survivingHeroAtk = heroAtkBase > 0 ? heroAtkBase * (me.heroWindfury ? 2 : 1) : 0;
+  const fullSwingsTotal = swingUnits(me).reduce((a, b) => a + b.atk, 0);
 
-  const faceAtk = wall.cleared ? wall.leftover : 0;
+  let best: SweepPlan | null = null;
+  for (let i = 0; i < hand.length; i += 1) {
+    if (i === levelerIdx) continue;
+    const c = hand[i];
+    if (!c.cardId) continue;
+    const effCost = handCardEffectiveCost(c);
+    if (effCost === null || levelerCost + effCost > budget) continue;
 
-  // 直伤和 buff 抢同一份水晶。
-  //
-  // 这里必须用背包精确解,不能用「按每点费用的伤害从高到低贪心」——
-  // 实测踩过:手上有寒冰箭(2 费 3 伤)和火球术(4 费 6 伤)、只有 5 水晶时,
-  // 两者单位伤害相同,贪心先拿便宜的寒冰箭,剩下 3 水晶打不出火球术,
-  // 于是只报 3 点直伤 —— 而正确答案是单打火球术 6 点。差一倍。
-  //
-  // 水晶数很小(通常 ≤ 10),DP 一张表就够,没有性能顾虑。
-  const spells = damageSpellsInHand(me.handCards ?? []);
-  const canBuff = me.minions.some((m) => m.atk > 0 && m.canAttack);
-  const buffs = canBuff ? buffsInHand(me.handCards ?? []) : [];
+    const resolved = resolveHandAoeCard(c, { spellPower, battlecryCtx: ctx, boardSlotsFree });
+    if (!resolved || resolved.spreads) continue;
 
-  /*
-   * 战吼伤害(2026-11-19 补)。
-   *
-   * 和直伤、buff 抢同一份水晶 —— 一张 4 费战吼随从占的是 4 点预算,
-   * 不是白送的伤害,所以必须一起进背包,不能事后相加。
-   *
-   * 前提用 `auras: me.auras?.length` 传:没这一层信息时是 undefined,
-   * 判不了就是不进表(宁可说少),不会把「也许有」当成「有」。
-   */
-  const battlecries = battlecriesInHand(me.handCards ?? [], {
-    weapon: !!me.weapon,
-    minionCount: me.minions.length,
-    auras: me.auras?.length,
-  });
+    let survivingFaceAtk = fullSwingsTotal;
+    let survivingMinionCanAttack = me.minions.some((m) => m.atk > 0 && m.canAttack);
+    let ownLostCount = 0;
 
-  // 硬币也是钱:手上有几个硬币,这一回合就多几点可花。
-  // 不算它会把「5 水晶 + 硬币 + 火球」这种能斩杀的局面报成打不出来。
-  // 硬币的净贡献,不是枚数 —— 被加费的硬币打出来换不到水晶(见 manaBudget)
-  const budget = me.mana + (me.coinMana ?? me.coinCount ?? 0);
+    if (resolved.hitsOwnMinions) {
+      survivingFaceAtk = survivingHeroAtk;
+      survivingMinionCanAttack = false;
+      for (const m of me.minions) {
+        if (m.divineShield) {
+          // 圣盾挡掉这一下 1 血以上群伤仍能存活
+          if (m.atk > 0 && m.canAttack) {
+            survivingMinionCanAttack = true;
+            survivingFaceAtk += m.atk * (m.windfury ? 2 : 1);
+          }
+        } else {
+          ownLostCount += 1;
+        }
+      }
+    }
 
-  const items = [
-    ...spells.map((s) => ({ kind: 'spell' as const, card: s, value: s.damage + spellPower, cost: Math.max(0, s.cost) })),
-    ...buffs.map((b) => ({ kind: 'buff' as const, card: b, value: b.atk, cost: Math.max(0, b.cost) })),
-    ...battlecries.map((b) => ({ kind: 'battlecry' as const, card: b, value: b.damage, cost: Math.max(0, b.cost) })),
-  ].filter((c) => c.cost <= budget);
+    const cost = levelerCost + effCost;
+    const selfKill = resolved.selfHeroDamage >= myEffHp && resolved.selfHeroDamage > 0;
+    const candidate: SweepPlan = {
+      cost,
+      levelerIndex: levelerIdx,
+      leveler: leveler.name || cardName(leveler.cardId) || '变形牌',
+      sweeperIndex: i,
+      sweeper: c.name || cardName(c.cardId) || '清场牌',
+      sweeperId: c.cardId,
+      sweeperKind: resolved.kind,
+      sweeperCost: effCost,
+      damage: resolved.damage,
+      faceDamage: resolved.faceDamage,
+      hitsOwnMinions: resolved.hitsOwnMinions,
+      hitsOwnHero: resolved.hitsOwnHero,
+      selfHeroDamage: resolved.selfHeroDamage,
+      survivingFaceAtk,
+      survivingMinionCanAttack,
+      ownLostCount,
+      blocked: selfKill ? `${c.name || cardName(c.cardId) || '清场牌'}会伤自己 ${resolved.selfHeroDamage} 血，放出去自己先死了` : null,
+    };
 
-  const cap = Math.max(0, Math.min(budget, 30));
-  const dp: { value: number; picks: typeof items }[] = Array.from({ length: cap + 1 }, () => ({ value: 0, picks: [] }));
+    const bestSelfKill = Boolean(best && best.selfHeroDamage >= myEffHp && best.selfHeroDamage > 0);
+    const candReach = candidate.survivingFaceAtk + candidate.faceDamage;
+    const bestReach = best ? best.survivingFaceAtk + best.faceDamage : -1;
+    if (
+      !best
+      || (bestSelfKill && !selfKill)
+      || (bestSelfKill === selfKill && (
+        candReach > bestReach
+        || (candReach === bestReach && Number(candidate.hitsOwnMinions) < Number(best.hitsOwnMinions))
+        || (candReach === bestReach && candidate.hitsOwnMinions === best.hitsOwnMinions && candidate.cost < best.cost)
+      ))
+    ) {
+      best = candidate;
+    }
+  }
+  if (!best) return null;
+
+  if (!best.blocked) {
+    const shielded = taunts.find((m) => m.divineShield);
+    const reborn = foe.minions.find((m) => m.reborn);
+    best.blocked = shielded
+      ? `对面的「${targetLabel(shielded)}」带圣盾，群伤一次只破盾`
+      : reborn
+        ? `对面的「${targetLabel(reborn)}」带复生，扫完会以 1 血站起来`
+        : null;
+  }
+
+  return best;
+}
+
+/* ---------- 费用背包 -------------------------------------------------- */
+
+/** 单张手牌在背包里的条目（同槽位互斥/合并，绝不重复扣费）。 */
+type PackItem = {
+  handIndex: number;
+  cost: number;
+  value: number;
+  spell?: DamageCard;
+  buff?: BuffCard;
+  battlecry?: BattlecryCard;
+  charge?: ChargeCard;
+};
+
+function packBest(items: readonly PackItem[], cap: number): { value: number; picks: PackItem[] } {
+  const limit = Math.max(0, Math.min(cap, 30));
+  const dp: { value: number; picks: PackItem[] }[] = Array.from({ length: limit + 1 }, () => ({ value: 0, picks: [] }));
   for (const item of items) {
-    for (let m = cap; m >= item.cost; m -= 1) {
+    if (item.cost > limit) continue;
+    for (let m = limit; m >= item.cost; m -= 1) {
       const prev = dp[m - item.cost];
       const candidate = prev.value + item.value;
       if (candidate > dp[m].value) dp[m] = { value: candidate, picks: [...prev.picks, item] };
     }
   }
-  const best = dp.reduce((a, b) => (b.value > a.value ? b : a), dp[0]);
+  return dp.reduce((a, b) => (b.value > a.value ? b : a), dp[0]);
+}
 
+function sumPicks(picks: readonly PackItem[]) {
   let manaSpent = 0;
   let spellDamage = 0;
   let buffDamage = 0;
   let battlecryDamage = 0;
-  const usedSpells: DamageCard[] = [];
-  const usedBuffs: BuffCard[] = [];
-  const usedBattlecries: BattlecryCard[] = [];
-  for (const pick of best.picks) {
-    manaSpent += pick.cost;
-    if (pick.kind === 'spell') {
-      spellDamage += pick.value;
-      usedSpells.push(pick.card);
-    } else if (pick.kind === 'battlecry') {
-      battlecryDamage += pick.value;
-      usedBattlecries.push(pick.card);
-    } else {
-      buffDamage += pick.value;
-      usedBuffs.push(pick.card);
+  let chargeDamage = 0;
+  const spells: DamageCard[] = [];
+  const buffs: BuffCard[] = [];
+  const battlecries: BattlecryCard[] = [];
+  const charges: ChargeCard[] = [];
+  for (const p of picks) {
+    manaSpent += p.cost;
+    if (p.spell) {
+      spellDamage += p.spell.damage;
+      spells.push(p.spell);
+    }
+    if (p.buff) {
+      buffDamage += p.buff.atk;
+      buffs.push(p.buff);
+    }
+    if (p.battlecry) {
+      battlecryDamage += p.battlecry.damage;
+      battlecries.push(p.battlecry);
+    }
+    if (p.charge) {
+      chargeDamage += p.charge.damage;
+      charges.push(p.charge);
+    }
+  }
+  return {
+    manaSpent, spellDamage, buffDamage, battlecryDamage, chargeDamage,
+    spells, buffs, battlecries, charges,
+  };
+}
+
+/** 构造所有可进入斩杀背包的手牌候选（按墙是否已过区分冲锋/磁力可行性）。 */
+function collectPackItems(
+  me: SideState,
+  wallCleared: boolean,
+  ctx: BattlecryContext,
+  excludeIndices?: Set<number>,
+  canBuffOverride?: boolean,
+): PackItem[] {
+  const hand = (me.handCards ?? []) as LethalHandCard[];
+  const spellPower = me.spellPower ?? 0;
+  const comboActive = Boolean(me.comboActive);
+  const canBuff = canBuffOverride ?? me.minions.some((m) => m.atk > 0 && m.canAttack);
+  const readyMech = canBuffOverride === false
+    ? false
+    : me.minions.some((m) => m.atk > 0 && m.canAttack && m.race === 'MECHANICAL');
+  const boardHasSlot = me.minions.length < 7;
+  const myEffHp = me.health + me.armor;
+
+  const out: PackItem[] = [];
+  for (let idx = 0; idx < hand.length; idx += 1) {
+    if (excludeIndices?.has(idx)) continue;
+    const card = hand[idx];
+    if (!card.cardId) continue;
+
+    const fx = cardEffects(card.cardId);
+    const note = cardNote(card.cardId);
+    const type = cardTypeOf(card.cardId);
+    const dg = card.darkGift ? darkGiftEffects(card.darkGift.cardId, card.darkGift.note) : null;
+
+    let spellItem: DamageCard | undefined;
+    let buffItem: BuffCard | undefined;
+    let battlecryItem: BattlecryCard | undefined;
+    let chargeItem: ChargeCard | undefined;
+    let resolvedCost: number | null = null;
+
+    // 1) 直伤法术（含连击增益替换而非叠加；烧死自己的自伤法术不计）
+    const dCard = damageSpellsInHand([{ cardId: card.cardId }])[0];
+    if (dCard && !(fx.selfHeroDamage > 0 && fx.selfHeroDamage + spellPower >= myEffHp)) {
+      const c = handCardEffectiveCost(card, dCard.cost);
+      if (c !== null) {
+        resolvedCost = c;
+        let baseDmg = dCard.damage;
+        if (comboActive && fx.combo && fx.comboDamage > 0 && !/随机/.test(note) && !fx.aoeMinionsOnly) {
+          baseDmg = Math.max(baseDmg, fx.comboDamage);
+        }
+        spellItem = {
+          cardId: card.cardId,
+          name: card.name || dCard.name || cardName(card.cardId),
+          cost: c,
+          damage: baseDmg + spellPower,
+        };
+      }
+    } else if (
+      type === 'S' && comboActive && fx.combo && fx.comboDamage > 0
+      && !/随机/.test(note) && !fx.aoeMinionsOnly && !/伤害\s*\d+[^\s]*随从/.test(note)
+      && !(fx.selfHeroDamage > 0 && fx.selfHeroDamage + spellPower >= myEffHp)
+    ) {
+      const c = handCardEffectiveCost(card);
+      if (c !== null) {
+        resolvedCost = c;
+        spellItem = {
+          cardId: card.cardId,
+          name: card.name || cardName(card.cardId) || card.cardId,
+          cost: c,
+          damage: fx.comboDamage + spellPower,
+        };
+      }
+    }
+
+    // 2) 加攻 buff 法术或磁力贴机械
+    const bCard = canBuff ? lookupBuffCard(card.cardId) : undefined;
+    if (bCard) {
+      const c = handCardEffectiveCost(card, bCard.cost);
+      if (c !== null) {
+        resolvedCost ??= c;
+        const atk = comboActive && fx.combo && fx.comboBuffAtk > 0 ? Math.max(bCard.atk, fx.comboBuffAtk) : bCard.atk;
+        if (atk > 0) {
+          buffItem = {
+            cardId: card.cardId,
+            name: card.name || bCard.name || cardName(card.cardId),
+            cost: c,
+            atk,
+            health: bCard.health,
+          };
+        }
+      }
+    } else if (type === 'M' && fx.magnetic && wallCleared && readyMech) {
+      const c = handCardEffectiveCost(card);
+      const body = cardBody(card.cardId);
+      const atk = (body?.atk ?? 0) + (dg?.atkBonus ?? 0);
+      if (c !== null && atk > 0) {
+        resolvedCost ??= c;
+        buffItem = {
+          cardId: card.cardId,
+          name: card.name || cardName(card.cardId) || card.cardId,
+          cost: c,
+          atk,
+          health: (body?.health ?? 0) + (dg?.hpBonus ?? 0),
+        };
+      }
+    }
+
+    // 3) 随从战吼 / 随从连击直伤（受限于我方 7 格上限）
+    if (boardHasSlot || type !== 'M') {
+      const c = handCardEffectiveCost(card);
+      if (c !== null) {
+        if (
+          fx.battlecry > 0
+          && battlecryState(fx, ctx) === 'ready'
+          && !/随机/.test(note)
+          && !new RegExp(`伤害\\s*${fx.battlecry}[^\\s]*随从`).test(note)
+        ) {
+          const mult = dg?.doubleBattlecry ? 2 : 1;
+          if (fx.selfHeroDamage > 0 && fx.selfHeroDamage * mult >= myEffHp) {
+            // 自伤烧死自己不算斩杀
+          } else {
+            resolvedCost ??= c;
+            battlecryItem = {
+              cardId: card.cardId,
+              name: card.name || cardName(card.cardId),
+              cost: c,
+              damage: fx.battlecry * mult,
+              ...(mult > 1 ? { tag: '双倍战吼' } : {}),
+            };
+          }
+        } else if (
+          type === 'M' && comboActive && fx.combo && fx.comboDamage > 0
+          && !/随机/.test(note) && !/伤害\s*\d+[^\s]*随从/.test(note)
+        ) {
+          resolvedCost ??= c;
+          battlecryItem = {
+            cardId: card.cardId,
+            name: card.name || cardName(card.cardId),
+            cost: c,
+            damage: fx.comboDamage,
+            tag: '连击',
+          };
+        }
+      }
+    }
+
+    // 4) 冲锋随从打脸（磁力贴机械的情况已走 buff，不重复计算；墙未破则只有无视嘲讽才可过墙）
+    if (
+      type === 'M' && boardHasSlot && !buffItem
+      && (wallCleared || fx.ignoreTaunt)
+      && (/冲锋/.test(note) || !!dg?.charge)
+      && !/(?:不能|无法)攻击/.test(note)
+    ) {
+      const c = handCardEffectiveCost(card);
+      if (c !== null) {
+        const body = cardBody(card.cardId);
+        const selfComboAtk = comboActive && fx.combo && fx.comboBuffAtk > 0 ? fx.comboBuffAtk : 0;
+        const atk = (body?.atk ?? 0) + (dg?.atkBonus ?? 0) + selfComboAtk;
+        if (atk > 0) {
+          resolvedCost ??= c;
+          const swings = (dg?.windfury || /(?:^|\s)风怒(?:\s|$)/.test(note)) ? 2 : 1;
+          chargeItem = {
+            cardId: card.cardId,
+            name: card.name || cardName(card.cardId) || card.cardId,
+            cost: c,
+            damage: atk * swings,
+            ...(dg?.charge ? { reason: '黑暗之赐冲锋' } : {}),
+          };
+        }
+      }
+    }
+
+    if (resolvedCost === null) continue;
+    const value = (spellItem?.damage ?? 0) + (buffItem?.atk ?? 0) + (battlecryItem?.damage ?? 0) + (chargeItem?.damage ?? 0);
+    if (value <= 0) continue;
+
+    out.push({
+      handIndex: idx,
+      cost: resolvedCost,
+      value,
+      ...(spellItem ? { spell: spellItem } : {}),
+      ...(buffItem ? { buff: buffItem } : {}),
+      ...(battlecryItem ? { battlecry: battlecryItem } : {}),
+      ...(chargeItem ? { charge: chargeItem } : {}),
+    });
+  }
+  return out;
+}
+
+/** 算这一回合的斩杀上限。 */
+export function planLethal(
+  snapshot: GameSnapshot,
+  opts?: { deckHasDuplicates?: boolean },
+): LethalPlan {
+  const me = snapshot.me;
+  const foe = snapshot.opponent;
+  const target = foe.health + foe.armor;
+
+  const units = swingUnits(me);
+  const swingsTotal = units.reduce((a, b) => a + b.atk, 0);
+
+  const spellPower = me.spellPower ?? 0;
+  const ignoreTaunt = me.minions.some((m) => cardEffects(m.cardId).ignoreTaunt);
+  const taunts = ignoreTaunt ? [] : foe.minions.filter((m) => m.taunt);
+  let wall: WallResult = taunts.length
+    ? breachTaunts(units, taunts)
+    : { cleared: true, spent: 0, leftover: swingsTotal, steps: [] };
+
+  let faceAtk = wall.cleared ? wall.leftover : 0;
+
+  const budget = me.mana + (me.coinMana ?? me.coinCount ?? 0);
+  const ctx = makeBattlecryCtx(me, opts?.deckHasDuplicates);
+  const canBuff = me.minions.some((m) => m.atk > 0 && m.canAttack);
+  const readyMech = me.minions.some((m) => m.atk > 0 && m.canAttack && m.race === 'MECHANICAL');
+
+  const items = collectPackItems(me, wall.cleared, ctx).filter((c) => c.cost <= budget);
+  const best = packBest(items, budget);
+  let chosen = sumPicks(best.picks);
+  let total = faceAtk + chosen.spellDamage + chosen.buffDamage + chosen.battlecryDamage + chosen.chargeDamage;
+
+  // 清场组合：先把对面嘲讽扫干净，再算清场后实际存活的场攻 + 剩余预算
+  const sweep = detectSweep(me, foe, budget, opts?.deckHasDuplicates);
+  let sweepTook = false;
+  if (sweep && !sweep.blocked) {
+    const exclude = new Set<number>([sweep.levelerIndex, sweep.sweeperIndex]);
+    const restItems = collectPackItems(me, true, ctx, exclude, sweep.survivingMinionCanAttack)
+      .filter((c) => c.cost <= budget - sweep.cost);
+    const restSum = sumPicks(packBest(restItems, budget - sweep.cost).picks);
+    const sweepTotal = sweep.survivingFaceAtk + sweep.faceDamage
+      + restSum.spellDamage + restSum.buffDamage + restSum.battlecryDamage + restSum.chargeDamage;
+
+    if (sweepTotal > total && total < target && sweepTotal >= target) {
+      sweepTook = true;
+      total = sweepTotal;
+      faceAtk = sweep.survivingFaceAtk;
+      const lossNote = sweep.ownLostCount > 0 ? `（我方 ${sweep.ownLostCount} 只非圣盾随从一并阵亡）` : '';
+      const atkStep = sweep.survivingFaceAtk > 0
+        ? `${sweep.survivingFaceAtk} 点场攻${sweep.ownLostCount > 0 ? '存活' : '全部'}打脸`
+        : '我方随从一并阵亡，剩余伤害直接砸脸';
+      wall = {
+        cleared: true,
+        spent: 0,
+        leftover: sweep.survivingFaceAtk,
+        steps: [
+          `先打${sweep.leveler}，把全场变成 1 血，再打${sweep.sweeper}扫 ${sweep.damage} 点 —— `
+          + `嘲讽随从跟着一起清掉${lossNote}，${atkStep}`,
+        ],
+      };
+      if (sweep.sweeperKind === 'spell') {
+        chosen = {
+          manaSpent: restSum.manaSpent + sweep.cost,
+          spellDamage: restSum.spellDamage + sweep.faceDamage,
+          buffDamage: restSum.buffDamage,
+          battlecryDamage: restSum.battlecryDamage,
+          chargeDamage: restSum.chargeDamage,
+          spells: sweep.faceDamage > 0
+            ? [...restSum.spells, { cardId: sweep.sweeperId, name: sweep.sweeper, cost: sweep.sweeperCost, damage: sweep.faceDamage }]
+            : restSum.spells,
+          buffs: restSum.buffs,
+          battlecries: restSum.battlecries,
+          charges: restSum.charges,
+        };
+      } else {
+        chosen = {
+          manaSpent: restSum.manaSpent + sweep.cost,
+          spellDamage: restSum.spellDamage,
+          buffDamage: restSum.buffDamage,
+          battlecryDamage: restSum.battlecryDamage + sweep.faceDamage,
+          chargeDamage: restSum.chargeDamage,
+          spells: restSum.spells,
+          buffs: restSum.buffs,
+          battlecries: sweep.faceDamage > 0
+            ? [...restSum.battlecries, { cardId: sweep.sweeperId, name: sweep.sweeper, cost: sweep.sweeperCost, damage: sweep.faceDamage }]
+            : restSum.battlecries,
+          charges: restSum.charges,
+        };
+      }
     }
   }
 
-  const total = faceAtk + spellDamage + buffDamage + battlecryDamage;
+  const {
+    manaSpent, spellDamage, buffDamage, battlecryDamage, chargeDamage,
+    spells: usedSpells, buffs: usedBuffs, battlecries: usedBattlecries, charges: usedCharges,
+  } = chosen;
 
-  const allBuffs = buffsInHand(me.handCards ?? []);
+  const hand = (me.handCards ?? []) as LethalHandCard[];
+  const allBuffs = buffsInHand(hand);
   const caveats: string[] = [];
-  if (taunts.length) caveats.push('过墙按「用现有攻击力去解」算,没有考虑你先用法术解墙的情况');
+  if (taunts.length && !sweepTook) caveats.push('过墙按「用现有攻击力去解」算,没有考虑你先用法术解墙的情况');
+  if (sweepTook && sweep) {
+    const selfHeroNote = sweep.selfHeroDamage > 0 ? `（注意会伤己方英雄 ${sweep.selfHeroDamage} 血）` : '';
+    const ownLossNote = sweep.ownLostCount > 0 ? `（连带烧死我方 ${sweep.ownLostCount} 只非圣盾随从，仅计存活场攻）` : '';
+    caveats.push(`清场组合按「${sweep.leveler}把全场变 1 血、${sweep.sweeper}扫 ${sweep.damage} 点」且对面无圣盾或复生随从的前提算${selfHeroNote}${ownLossNote}`);
+  }
+  if (sweep?.blocked) caveats.push(`本来能先清场过墙,但${sweep.blocked}`);
   if (allBuffs.length && !canBuff) caveats.push('手上有加攻击的牌,但场上没有能攻击的随从,接不住');
   if (usedBuffs.length) caveats.push('buff 假设能加到能攻击的随从身上');
   if (spellPower > 0) caveats.push(`直伤已计入场上 +${spellPower} 法术伤害`);
   if (ignoreTaunt) caveats.push('我方有无视嘲讽的随从,过墙这一步按跳过算');
-  /*
-   * 战吼那句要跟着实情走（2026-11-19）。
-   *
-   * 原来固定写「战吼伤害…都没算进去」—— 现在确定打得出的已经进 total 了,
-   * 再这么写就是自相矛盾:上面那个数明明含战吼,下面又说没算。
-   *
-   * 剩下的两类仍要说清「没算」:条件不满足/判不了的战吼、随从亡语。
-   */
-  const pendingBattlecries = (me.handCards ?? []).filter((c) => {
+
+  if (!wall.cleared && readyMech && hand.some((c) => cardTypeOf(c.cardId) === 'M' && cardEffects(c.cardId).magnetic)) {
+    caveats.push('手上有磁力随从可贴给场上机械加攻，但需先过对面嘲讽墙');
+  }
+
+  // 战吼与连击提醒
+  const pendingBattlecries = hand.filter((c) => {
     const fx = cardEffects(c.cardId);
     if (fx.battlecry <= 0) return false;
     return !usedBattlecries.some((u) => u.cardId === c.cardId)
-      && battlecryState(fx, { weapon: !!me.weapon, minionCount: me.minions.length, auras: me.auras?.length }) !== 'ready';
+      && battlecryState(fx, ctx) !== 'ready';
   });
   if (usedBattlecries.length) {
-    caveats.push(`战吼已计入 ${battlecryDamage} 点(${usedBattlecries.map((b) => `${b.name} ${b.damage}`).join(' + ')})`);
+    caveats.push(`战吼已计入 ${battlecryDamage} 点(${usedBattlecries.map((b) => `${b.name}${b.tag ? `[${b.tag}]` : ''} ${b.damage}`).join(' + ')})`);
+  }
+  if (usedCharges.length) {
+    caveats.push(`冲锋已计入 ${chargeDamage} 点(${usedCharges.map((c) => `${c.name} ${c.damage}`).join(' + ')})`);
   }
   if (pendingBattlecries.length) {
     caveats.push('还有战吼因为前提不满足、或我判断不了前提,没算进上面那个数');
   }
   if (!usedBattlecries.length && !pendingBattlecries.length) {
-    caveats.push('战吼、随从亡语都没算进去');
+    caveats.push('随从亡语等非确定来源未算进去');
   }
-  /*
-   * **持续效果里会影响斩杀的那几张，逐一点名**（2026-11-14）。
-   *
-   * 上一句笼统说「光环没算」，模型看到等于没看到 —— 它不知道场上是哪张光环、
-   * 也不知道那张光环值多少伤害。奥丁是最典型的：每点护甲变 1 点攻击力，
-   * 有他在场，一张 3 费加 3 甲的牌等于白送 3 点打脸攻击。
-   *
-   * **只提示、不改 `total`**：护甲法术和直伤共享水晶，算进去要重排整条费用分配；
-   * 而算错一次比说少一次糟得多（这个文件的开头就写着这条）。所以让它自己判断。
-   */
+
+  // 未激活连击时，如果手里有连击输出牌且存在便宜启动牌，提示先启动连击
+  if (!me.comboActive) {
+    const comboPayoffs = hand.filter((c) => {
+      const fx = cardEffects(c.cardId);
+      return fx.combo && (fx.comboDamage > 0 || fx.comboBuffAtk > 0);
+    });
+    if (comboPayoffs.length) {
+      const hasStarter = hand.some((c) => {
+        const ec = handCardEffectiveCost(c);
+        return ec !== null && ec < budget && !comboPayoffs.includes(c);
+      }) || (me.coinMana ?? me.coinCount ?? 0) > 0;
+      if (hasStarter) {
+        const names = comboPayoffs.slice(0, 2).map((c) => c.name || cardName(c.cardId)).filter(Boolean);
+        caveats.push(`连击尚未激活：先打一张低费牌（或硬币）再出${names.join('/')}，连击部分没算进上面总数`);
+      }
+    }
+  }
+
   const odynOnBoard = me.minions.some((m) => (m.cardId || '').replace(/^(CORE_|VAN_)/, '') === 'TTN_811');
   if (odynOnBoard) {
-    const armorSpell = (me.handCards ?? []).find((c) => cardEffects(c.cardId).armor > 0 && c.cost <= me.mana);
+    const armorSpell = hand.find((c) => cardEffects(c.cardId).armor > 0 && (c.cost ?? 99) <= me.mana);
     caveats.push(armorSpell
       ? `场上有奥丁（每点护甲变等量攻击力）：手牌里的${armorSpell.name ?? '护甲牌'}能白送一份打脸攻击，这部分**没算进上面那个数**`
       : '场上有奥丁（每点护甲变等量攻击力）：这回合的护甲来源没算进去');
   }
-  /*
-   * **场上其余持续效果，逐个点名**（2026-11-14）。
-   *
-   * 奥丁上面单独处理（它唯一能直接变成伤害）。其余的光环改变的是**场上随从的值**：
-   * 「你的图腾拥有+2攻击力」让每个图腾多 2 点场攻，「你的所有机械拥有突袭」让新上场的
-   * 机械立刻能打 —— 这些都真切影响这回合能打出多少，但要把它们算准，得对每张光环
-   * 单独建模（哪些随从算图腾？机械是这回合才下的吗？）。
-   *
-   * 这条链的规矩是「宁可说少」：所以写进 caveats 而不是改 `faceAtk`。
-   * 她说得出这句，就不会给出一个偏低的数还以为自己算全了。
-   *
-   * 最多两条 —— 三条以上会把重点淹掉，而一局同时挂三张光环本来就少见。
-   */
+
   const otherPassives = me.minions
     .filter((m) => (m.cardId || '').replace(/^(CORE_|VAN_)/, '') !== 'TTN_811')
     .map((m) => ({ name: m.name || '场上随从', text: passiveOf(m.cardId || '') }))
@@ -491,13 +942,16 @@ export function planLethal(snapshot: GameSnapshot): LethalPlan {
     swingsTotal,
     wall,
     faceAtk,
+    viaClear: sweepTook,
     spellDamage,
     buffDamage,
     battlecryDamage,
+    chargeDamage,
     total,
     spells: usedSpells,
     buffs: usedBuffs,
     battlecries: usedBattlecries,
+    charges: usedCharges,
     manaSpent,
     spellPower,
     caveats,

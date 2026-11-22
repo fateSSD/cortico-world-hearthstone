@@ -1828,3 +1828,161 @@ test('对手永久打不了的随从仍然要标出来', () => {
   const foeLine = text.split('\n').find((l) => l.startsWith('对手:')) ?? '';
   assert.match(foeLine, /打不了/, '休眠/无法攻击的随从要标出来');
 });
+
+test('先换的文本要带随从名，不能只写身材', () => {
+  /*
+   * 2026-11-20 那局第 17 回合的真实场面：我场上有两只 8/8
+   * （灭世信徒、瓦尼尔士兵带圣盾），对手两道嘲讽。
+   *
+   * 当时回合事件里的原文是「先换:8/8 打 滑行者巨怪(6/7嘲讽)」——
+   * 两只都是 8/8，读的人根本分不清推的是哪只；
+   * 下游还把它记成「她推了『8/8』这张牌」，写进日记和分歧统计。
+   */
+  const s = snap(
+    side({ health: 20, minions: [
+      minion({ id: 11, name: '灭世信徒', atk: 8, health: 8 }),
+      minion({ id: 12, name: '瓦尼尔士兵', atk: 8, health: 8, divineShield: true }),
+    ] }),
+    side({ isLocal: false, health: 30, minions: [
+      minion({ id: 21, name: '滑行者巨怪', atk: 6, health: 7, taunt: true }),
+      minion({ id: 22, name: '烈焰元素', atk: 6, health: 7 }),
+    ] }),
+  );
+  const b = briefAdvice(s);
+  assert.equal(b.kind, 'trade', `该走先换:${b.text}`);
+  assert.match(b.text, /先换:/);
+  assert.match(b.text, /灭世信徒\(8\/8\)/, `随从名要跟身材一起出现:${b.text}`);
+  assert.doesNotMatch(b.text, /先换:8\/8/, `不能只写身材:${b.text}`);
+});
+
+test('「能做的交换」列表里的主语同样带名字', () => {
+  const s = snap(
+    side({ health: 30, minions: [
+      minion({ id: 11, name: '灭世信徒', atk: 8, health: 8 }),
+    ] }),
+    side({ isLocal: false, health: 30, minions: [
+      minion({ id: 21, name: '滑行者巨怪', atk: 6, health: 7, taunt: true }),
+    ] }),
+  );
+  const text = renderAdvice(advise(s), s);
+  assert.match(text, /灭世信徒\(8\/8\) 打 滑行者巨怪/, `交换列表也要带名字:${text}`);
+});
+
+/* ---------- 先换之外的那条路（2026-11-20） ---------------------------- */
+
+test('先换的同时要把手上的抽牌 / 变形点出来', () => {
+  /*
+   * 2026-11-20 那局第 17 回合的真实局面：我 30 血、19 点场攻，对面 15 血两道嘲讽。
+   * 她当时只说「两只 8/8 各撞一只，剩下两费下血色斗士，别贪着打脸」——
+   * 手上那张谦恭审判（3 费抽三张）和生而平等（2 费所有随从变 1 血）一个字没提。
+   * 而那正是当回合斩杀的钥匙：抽到群伤 → 平等 + 群伤清掉两道墙 → 19 点全打脸。
+   */
+  const s = snap(
+    side({
+      health: 30, mana: 9, manaMax: 9,
+      auras: [{ cardId: 'BE_146', name: '誓缚光环' }],
+      handCards: [
+        { id: 1, cardId: 'BE_154', cost: 3 },        // 谦恭审判：抽三张牌
+        { id: 2, cardId: 'CORE_EX1_619', cost: 2 },  // 生而平等：所有随从生命变 1
+        { id: 3, cardId: 'CATA_479t2', cost: 4 },    // 飞龙机动：+1 攻（不该进这句）
+      ],
+      minions: [
+        minion({ id: 11, name: '时间流具象', atk: 3, health: 2 }),
+        minion({ id: 12, name: '灭世信徒', atk: 8, health: 8 }),
+        minion({ id: 13, name: '瓦尼尔士兵', atk: 8, health: 8, divineShield: true }),
+      ],
+    }),
+    side({
+      isLocal: false, health: 15,
+      minions: [
+        minion({ id: 21, name: '女巫的学徒', atk: 5, health: 6, taunt: true }),
+        minion({ id: 22, name: '火羽精灵', atk: 4, health: 5 }),
+        minion({ id: 23, name: '滑行者巨怪', atk: 6, health: 7, taunt: true }),
+        minion({ id: 24, name: '烈焰元素', atk: 6, health: 7 }),
+      ],
+    }),
+  );
+  const b = briefAdvice(s);
+  assert.equal(b.kind, 'trade', `这一回合不该是别的判断:${b.text}`);
+  assert.match(b.text, /先换:灭世信徒\(8\/8\)/, `先换的主语要带名字:${b.text}`);
+  assert.match(b.text, /谦恭审判/, `抽牌牌要提:${b.text}`);
+  assert.match(b.text, /生而平等/, `变形牌要提:${b.text}`);
+  assert.doesNotMatch(b.text, /飞龙机动/, `加攻牌不该挤进这一句:${b.text}`);
+});
+
+test('手上没有抽牌 / 变形 / 群伤时，不加那句提示', () => {
+  // 只推「撞墙」是对的，多一句话就是噪音
+  const s = snap(
+    side({
+      health: 12, mana: 4, manaMax: 4,
+      handCards: [{ id: 1, cardId: 'CATA_479t2', cost: 4 }],  // 飞龙机动
+      minions: [minion({ id: 11, name: '灭世信徒', atk: 6, health: 7 })],
+    }),
+    side({ isLocal: false, health: 30, minions: [
+      minion({ id: 21, name: '滑行者巨怪', atk: 3, health: 3 }),
+    ] }),
+  );
+  const b = briefAdvice(s);
+  assert.equal(b.kind, 'trade');
+  assert.doesNotMatch(b.text, /别急着把攻击力全撞在墙上/, `不该加提示:${b.text}`);
+});
+
+test('清场组合的文案要说「先清场」，不能说「过墙后剩」', () => {
+  /*
+   * 墙是被扫掉的，一个随从都没去撞。写成「总攻 19，N 点去撞墙」直接是反的，
+   * 他会照着分配攻击力去解嘲讽 —— 那正好把这手牌打废。
+   */
+  const s = snap(
+    side({
+      health: 30, mana: 9, manaMax: 9,
+      auras: [{ cardId: 'BE_146', name: '誓缚光环' }],
+      handCards: [
+        { id: 1, cardId: 'CORE_EX1_619', cost: 2 },  // 生而平等
+        { id: 2, cardId: 'TIME_019', cost: 4 },      // 时间流具象（战吼 3 伤群体）
+      ],
+      minions: [
+        minion({ id: 11, name: '时间流具象', atk: 3, health: 2 }),
+        minion({ id: 12, name: '灭世信徒', atk: 8, health: 8 }),
+        minion({ id: 13, name: '瓦尼尔士兵', atk: 8, health: 8, divineShield: true }),
+      ],
+    }),
+    side({
+      isLocal: false, health: 15,
+      minions: [
+        minion({ id: 21, name: '女巫的学徒', atk: 5, health: 6, taunt: true }),
+        minion({ id: 23, name: '滑行者巨怪', atk: 6, health: 7, taunt: true }),
+      ],
+    }),
+  );
+  const b = briefAdvice(s);
+  assert.equal(b.kind, 'lethal', `这一手就是斩杀:${b.text}`);
+  assert.match(b.text, /先清场/, `要说清是清出来的:${b.text}`);
+  assert.match(b.text, /19/, '场攻 19 全打脸');
+  assert.doesNotMatch(b.text, /去撞墙/, `没有任何随从去撞墙:${b.text}`);
+});
+
+test('工具回执的【斩杀线】也要说清是清出来的，不是撞开的', () => {
+  // 她读的是这一段，不是 briefAdvice 那一句
+  const s = snap(
+    side({
+      health: 30, mana: 9, manaMax: 9,
+      auras: [{ cardId: 'BE_146', name: '誓缚光环' }],
+      handCards: [
+        { id: 1, cardId: 'CORE_EX1_619', cost: 2 },
+        { id: 2, cardId: 'TIME_019', cost: 4 },
+      ],
+      minions: [
+        minion({ id: 12, name: '灭世信徒', atk: 8, health: 8 }),
+        minion({ id: 13, name: '瓦尼尔士兵', atk: 8, health: 8, divineShield: true }),
+      ],
+    }),
+    side({ isLocal: false, health: 15, minions: [
+      minion({ id: 21, name: '女巫的学徒', atk: 5, health: 6, taunt: true }),
+      minion({ id: 23, name: '滑行者巨怪', atk: 6, health: 7, taunt: true }),
+    ] }),
+  );
+  const text = renderAdvice(advise(s), s);
+  const line = text.split('\n').find((l) => l.includes('→')) ?? '';
+  assert.match(line, /先清场后 16 全打脸/, `回执那一行要改口:${line}`);
+  assert.doesNotMatch(line, /过墙后可打脸/, `别再说撞开的:${line}`);
+});

@@ -35,7 +35,24 @@ const RE_HIDE = /^HIDE_ENTITY - Entity=(\[[^\]]*\]|\S+) tag=(\w+) value=(.*)$/;
 const RE_TAG_CHANGE = /^TAG_CHANGE Entity=(\[[^\]]*\]|\S+) tag=(\w+) value=(.*)$/;
 const RE_BLOCK_START = /^BLOCK_START (.*)$/;
 /** 缩进后的纯标签行:trim 之后形如 `tag=HEALTH value=30`。 */
-const RE_TAG_LINE = /^tag=([A-Za-z_][A-Za-z0-9_]*) value=(.*)$/;
+const RE_TAG_LINE = /^tag=([A-Za-z0-9_]+) value=(.*)$/;
+
+/** 白名单数字 tag 映射（3527 = 灌注次数）。 */
+const NUMERIC_TAG_ALIAS: Record<string, string> = {
+  '3527': 'IMBUE_COUNT',
+};
+
+/** 已知灌注替换出的英雄技能 cardId 与按灌注层数（TAG_SCRIPT_DATA_NUM_1）动态生成的名称和效果说明。 */
+const IMBUE_HERO_POWERS: Record<string, { name: string; note: (n: number) => string }> = {
+  EDR_445p: { name: '巨龙的祝福', note: (n) => `洗两张${Math.max(1, n)}费翡翠传送门进牌库(召唤${Math.max(1, n)}费龙)` },
+  EDR_448p: { name: '轻风的祝福', note: (n) => `随机使友方随从变形成法力值消耗增加(${Math.max(1, n)})的随从` },
+  EDR_449p: { name: '月亮的祝福', note: (n) => `发现牧师牌置入手牌，法力值消耗减少(${Math.max(1, n)})` },
+  EDR_847p: { name: '魔像的祝福', note: (n) => `召唤 ${Math.max(1, n)}/${Math.max(1, n)} 的植物魔像` },
+  EDR_850p: { name: '巨狼的祝福', note: (n) => `手牌随机野兽+${Math.max(1, n)}攻且减(${Math.max(1, n)})费` },
+  EDR_851p: { name: '小精灵的祝福', note: (n) => `召唤小精灵并对所有敌人随机造成 ${Math.max(1, n)} 点伤害` },
+  END_000p: { name: '青铜龙的祝福', note: (n) => `青铜龙的祝福(当前灌注 ${Math.max(1, n)} 阶)` },
+  END_003p: { name: '永恒龙的祝福', note: (n) => `永恒龙的祝福(当前灌注 ${Math.max(1, n)} 阶)` },
+};
 
 /** 对局本体实体的 id。它的 STATE/STEP 是「这局结束了」的另一个出口。 */
 const GAME_ENTITY_ID = 1;
@@ -154,6 +171,93 @@ interface EntityState {
    * 快枪那 6 点伤害本来是能用的,建议里一个字都没提。
    */
   enteredTurn?: number;
+  /** 第一次见到它时所在的区（用于记牌器区分原生牌库 vs 衍生）。 */
+  initialZone?: string;
+  /** 是否曾出现在 DECK 区。 */
+  wasInDeck?: boolean;
+  /** 进入 HAND 时在游戏界面上对本地玩家是否真正公开可见（如 REVEALED=1 或 PLAY 回手）。 */
+  publicInHand?: boolean;
+  /** 是否在牌库阶段被 HIDE_ENTITY / REVEALED=0 盖回背面（防止 Start-of-Game 展示后暗抽泄露）。 */
+  hiddenInDeck?: boolean;
+  /** 是否被实际打出过（PLAY block）。 */
+  everPlayed?: boolean;
+  playedTurn?: number;
+  enteredSecretTurn?: number;
+  graveyardTurn?: number;
+}
+
+export interface GameMeta {
+  gameType: string;
+  formatType: string;
+  scenarioId: number;
+}
+
+export interface DarkGiftInfo {
+  cardId: string;
+  name: string;
+  note: string;
+}
+
+export interface HeroPowerView {
+  cardId: string;
+  name: string;
+  cost: number;
+  exhausted: boolean;
+  scriptNum1: number;
+  note: string;
+}
+
+export interface TrackerCardEvent {
+  entityId: number;
+  cardId: string;
+  name: string;
+  cost: number;
+  turn: number;
+  isCreated: boolean;
+  creatorName?: string;
+}
+
+export interface TrackerHandSlot {
+  entityId: number;
+  enteredTurn: number;
+  heldTurns: number;
+  isCoin: boolean;
+  isCreated: boolean;
+  creatorName?: string;
+  revealedCardId?: string;
+  revealedName?: string;
+}
+
+export interface TrackerSecretInfo {
+  entityId: number;
+  enteredTurn: number;
+  cardId?: string;
+  name?: string;
+}
+
+export interface TrackerRawData {
+  turn: number;
+  localPlayerId: number;
+  meta: GameMeta;
+  me: {
+    heroClass: string;
+    deckCount: number;
+    drawnFromDeck: TrackerCardEvent[];
+    playedCards: TrackerCardEvent[];
+    graveyardCards: TrackerCardEvent[];
+    knownInDeck: TrackerCardEvent[];
+    handCards: { entityId: number; cardId: string; name: string; cost: number; isCreated: boolean }[];
+  };
+  opponent: {
+    heroClass: string;
+    deckCount: number;
+    playedCards: TrackerCardEvent[];
+    graveyardMinions: TrackerCardEvent[];
+    graveyardSpells: TrackerCardEvent[];
+    secrets: TrackerSecretInfo[];
+    revealedSecrets: TrackerCardEvent[];
+    handCards: TrackerHandSlot[];
+  };
 }
 
 export interface MinionView {
@@ -196,6 +300,8 @@ export interface MinionView {
    */
   cantAttack: boolean;
   canAttack: boolean;
+  /** 随从种族（如 MECHANICAL 机械、BEAST 野兽、DRAGON 龙等）。 */
+  race?: string;
 }
 
 export interface SideState {
@@ -251,6 +357,10 @@ export interface SideState {
      * 日斑巨龙抽到时是 1,打出时置 0。**这就是快枪的开关。**
      */
     poweredUp: boolean;
+    /** 黑暗之赐附魔效果（通过 DARK_GIFT_ENTITY 或附魔实体追踪）。 */
+    darkGift?: DarkGiftInfo;
+    /** 是否属于本局衍生出来的牌。 */
+    created?: boolean;
   }[];
   /**
    * 手牌里能加水晶的牌(幸运币、活动币)。
@@ -327,6 +437,12 @@ export interface SideState {
    * 而那时牌已经换完了。判据是本地玩家自己那一桶里的 `MULLIGAN_STATE`。
    */
   mulliganState: string;
+  /** 连击是否已激活（本回合已打出过至少一张牌）。 */
+  comboActive?: boolean;
+  /** 本局已灌注次数（0 = 未灌注）。 */
+  imbueCount?: number;
+  /** 当前场上的英雄技能。 */
+  heroPower?: HeroPowerView | null;
 }
 
 export interface GameSnapshot {
@@ -349,6 +465,8 @@ export interface GameSnapshot {
   opponent: SideState;
   /** 场上随从攻击力合计,含英雄本身的攻击力(武器或变形)。 */
   boardAttack: { mine: number; theirs: number };
+  /** 对局模式元数据（GameType / FormatType / ScenarioID）。 */
+  meta?: GameMeta;
 }
 
 export type ActionKind = 'play' | 'attack' | 'death' | 'hero-power' | 'weapon';
@@ -588,6 +706,7 @@ export class PowerLogParser {
   private deadSeen = new Set<number>();
   /** 一局内已报过的告警 id,换局时清空。 */
   public firedAlerts = new Set<string>();
+  private gameMeta: GameMeta = { gameType: '', formatType: '', scenarioId: 0 };
   private diag: Diagnostics = {
     lines: 0, powerLines: 0, unmatchedLines: 0, unmatchedSamples: [],
     tagChanges: 0, nameTags: 0, unmappedNames: 0, unmappedSamples: [], localPlayerId: null, localDetectedBy: 'default',
@@ -655,6 +774,7 @@ export class PowerLogParser {
     this.pendingName = null;
     this.localName = null;
     this.firedAlerts.clear();
+    this.gameMeta = { gameType: '', formatType: '', scenarioId: 0 };
   }
 
   get inGame(): boolean {
@@ -685,7 +805,8 @@ export class PowerLogParser {
 
     for (const line of lines) {
       this.diag.lines += 1;
-      // 名字绑定走旁路扫描:必须在 LINE_RE 过滤之前。理由见 scanNameBinding 的注释。
+      // 名字绑定与模式元数据走旁路扫描:必须在 LINE_RE 过滤之前。
+      this.scanGameMeta(line);
       this.scanNameBinding(line);
       const m = LINE_RE.exec(line);
       if (!m) continue;
@@ -756,16 +877,28 @@ export class PowerLogParser {
       if (ref?.name) entity.name = ref.name;
       // 引用之后才是 CardID=;从引用结束处往后找,免得把 entityName 里的内容当成卡号
       const cardId = / CardID=(\S*)/.exec(taken ? text.slice(taken.end) : text);
-      if (cardId && cardId[1]) entity.cardId = cardId[1];
+      if (cardId && cardId[1]) {
+        entity.cardId = cardId[1];
+        const curZone = tag(entity, 'ZONE');
+        if (curZone === 'HAND' || curZone === 'SETASIDE') {
+          entity.publicInHand = true;
+          entity.hiddenInDeck = false;
+        }
+      }
       this.current = id;
       return;
     }
-    // HIDE_ENTITY - Entity=[...] tag=ZONE value=SETASIDE
+    // HIDE_ENTITY - Entity=[...] tag=ZONE value=SETASIDE/DECK/HAND
     if (text.startsWith('HIDE_ENTITY - ')) {
       const taken = takeRef(text, 'Entity');
       const tail = splitTagValue(text);
       const id = taken ? this.resolveRef(parseEntityRef(taken.raw)) : null;
-      if (id !== null && tail) this.applyTag(id, tail.name, tail.value);
+      if (id !== null && tail) {
+        const entity = this.ensure(id);
+        entity.publicInHand = false;
+        if (tail.name === 'ZONE' && tail.value.trim() === 'DECK') entity.hiddenInDeck = true;
+        this.applyTag(id, tail.name, tail.value);
+      }
       return;
     }
     // TAG_CHANGE Entity=[...] tag=XXX value=YYY
@@ -802,7 +935,18 @@ export class PowerLogParser {
     if (this.diag.unmatchedSamples.length < 12) this.diag.unmatchedSamples.push(text.slice(0, 150));
   }
 
-  /* ---------- 玩家名形式的标签 ---------- */
+  /* ---------- 对局模式元数据与玩家名形式的标签 ---------- */
+
+  /** 旁路读取 `GameState.DebugPrintGame()` 里的模式与赛制。 */
+  private scanGameMeta(raw: string): void {
+    const marker = 'GameState.DebugPrintGame() - ';
+    const idx = raw.indexOf(marker);
+    if (idx < 0) return;
+    const body = raw.slice(idx + marker.length).trim();
+    if (body.startsWith('GameType=')) this.gameMeta.gameType = body.slice('GameType='.length).trim();
+    else if (body.startsWith('FormatType=')) this.gameMeta.formatType = body.slice('FormatType='.length).trim();
+    else if (body.startsWith('ScenarioID=')) this.gameMeta.scenarioId = num(body.slice('ScenarioID='.length).trim(), 0);
+  }
 
   /**
    * 旁路扫描:把 BattleTag 名字钉到 playerId 上。
@@ -849,8 +993,9 @@ export class PowerLogParser {
    * `TAG_CHANGE Entity=<玩家名> ...`。
    * 名字没有直接的 playerId 字段,只能靠 CURRENT_PLAYER=1 那一刻把名字绑到 playerId 上。
    */
-  private onPlayerNameTag(name: string, tagName: string, value: string): void {
+  private onPlayerNameTag(name: string, rawTagName: string, value: string): void {
     this.diag.nameTags += 1;
+    const tagName = NUMERIC_TAG_ALIAS[rawTagName] ?? rawTagName;
     const key = name.trim();
 
     // 换牌时能选牌的只有自己,对手不会出现 INPUT;占位符不能当真名记下来
@@ -950,8 +1095,9 @@ export class PowerLogParser {
     return null;
   }
 
-  private applyTag(id: number, rawName: string, rawValue: string): void {
-    // 数字形式的 tag(如 tag=1596)不承载我们知道含义的字段
+  private applyTag(id: number, rawTagName: string, rawValue: string): void {
+    const rawName = NUMERIC_TAG_ALIAS[rawTagName] ?? rawTagName;
+    // 数字形式的 tag(如 tag=1596)除白名单外不承载我们知道含义的字段
     if (!/^[A-Z_][A-Z0-9_]*$/.test(rawName)) return;
     const entity = this.ensure(id);
     const value = rawValue.trim();
@@ -967,13 +1113,50 @@ export class PowerLogParser {
     // 对手 0 血了还在问「这回合怎么打」。
     if (id === GAME_ENTITY_ID && (rawName === 'STATE' || rawName === 'STEP')) this.checkEndState();
 
+    if (rawName === 'REVEALED') {
+      if (value === '1') {
+        entity.publicInHand = true;
+        entity.hiddenInDeck = false;
+      } else if (value === '0') {
+        entity.publicInHand = false;
+        if (tag(entity, 'ZONE') === 'DECK') entity.hiddenInDeck = true;
+      }
+      return;
+    }
+
     if (rawName === 'ZONE') {
+      if (entity.initialZone === undefined) entity.initialZone = value;
+      if (value === 'DECK') {
+        entity.wasInDeck = true;
+        if (before !== undefined && before !== 'DECK') {
+          entity.publicInHand = false;
+          entity.hiddenInDeck = true;
+        }
+      }
       // 进手牌就记回合号。这张牌是抽到的、还是被效果放进来的,日志里分不出来,
       // 但「本回合到手」这件事两者都成立 —— 够判快枪了。
-      if (value === 'HAND') entity.enteredTurn = this.turn;
-      if (value === 'GRAVEYARD' && tag(entity, 'CARDTYPE') === 'MINION' && !this.deadSeen.has(id)) {
-        this.deadSeen.add(id);
-        this.record('death', id, null, `${labelOf(entity)} 阵亡`);
+      if (value === 'HAND') {
+        entity.enteredTurn = this.turn;
+        if (before === 'PLAY') {
+          // 场上随从/牌回手（如暗影步、冰冻陷阱）对双方明牌可见
+          entity.publicInHand = true;
+          entity.hiddenInDeck = false;
+        } else if (before === 'DECK') {
+          if (tag(entity, 'REVEALED') === '1') {
+            entity.publicInHand = true;
+            entity.hiddenInDeck = false;
+          } else {
+            entity.publicInHand = false;
+          }
+        }
+      }
+      if (value === 'SECRET' && entity.enteredSecretTurn === undefined) entity.enteredSecretTurn = this.turn;
+      if (value === 'GRAVEYARD') {
+        if (entity.graveyardTurn === undefined) entity.graveyardTurn = this.turn;
+        if (tag(entity, 'CARDTYPE') === 'MINION' && !this.deadSeen.has(id)) {
+          this.deadSeen.add(id);
+          this.record('death', id, null, `${labelOf(entity)} 阵亡`);
+        }
       }
       return;
     }
@@ -1144,6 +1327,10 @@ export class PowerLogParser {
     if (cardType === 'HERO_POWER' || (!entity?.cardId && tag(entity, 'ZONE') === 'PLAY')) {
       this.record('hero-power', entityId, null, `${labelOf(entity)} 使用英雄技能`);
       return;
+    }
+    if (entity) {
+      entity.everPlayed = true;
+      if (entity.playedTurn === undefined) entity.playedTurn = this.turn;
     }
     const targetLabel = target ? this.labelFor(target) : '';
     this.record(
@@ -1327,6 +1514,7 @@ export class PowerLogParser {
       me,
       opponent,
       boardAttack: { mine: sumAttack(me), theirs: sumAttack(opponent) },
+      meta: { ...this.gameMeta },
     };
   }
 
@@ -1375,7 +1563,63 @@ export class PowerLogParser {
       mana: 0, manaMax: 0, overload: 0, handCount: 0, handCards: [], coinCount: 0, coinMana: 0, deckCount: 0, secrets: 0, auras: [],
       spellPower: 0,
       minions: [], weapon: null, playState: '', mulliganState: '',
+      comboActive: false, imbueCount: 0, heroPower: null,
     };
+  }
+
+  /** 判断某实体是否属于本局衍生牌（排除系统初始发的后手硬币特殊判断在调用处处理）。 */
+  private isEntityCreated(e: EntityState): boolean {
+    const creator = num(tag(e, 'CREATOR') ?? tag(e, 'DISPLAYED_CREATOR'), 0);
+    if (creator > 0) return true;
+    if (e.initialZone && e.initialZone !== 'DECK' && e.initialZone !== 'HAND') return true;
+    return false;
+  }
+
+  /** 解析附着在手牌上的黑暗之赐效果。 */
+  private resolveDarkGift(
+    e: EntityState,
+    attachedEnchants: Map<number, EntityState[]>,
+  ): DarkGiftInfo | undefined {
+    const pickFromGiftEntity = (ge: EntityState | undefined): DarkGiftInfo | undefined => {
+      if (!ge?.cardId) return undefined;
+      const cid = ge.cardId.replace(/e\d*$/i, '');
+      const name = ge.name || cardName(cid) || cardName(ge.cardId) || '黑暗之赐';
+      const note = cardNote(cid) || cardNote(ge.cardId) || '';
+      return { cardId: cid, name, note };
+    };
+
+    const dgEid = num(tag(e, 'DARK_GIFT_ENTITY'), 0);
+    if (dgEid > 0) {
+      const hit = pickFromGiftEntity(this.entities.get(dgEid));
+      if (hit) return hit;
+    }
+
+    const enchants = attachedEnchants.get(e.id) ?? [];
+    for (const enc of enchants) {
+      const isNightmare = tagOn(enc, 'IS_NIGHTMARE_BONUS') || /^EDR_100t/i.test(enc.cardId);
+      if (!isNightmare) continue;
+      const cid = num(tag(enc, 'CREATOR'), 0);
+      if (cid > 0) {
+        const hit = pickFromGiftEntity(this.entities.get(cid));
+        if (hit) return hit;
+      }
+      const hit = pickFromGiftEntity(enc);
+      if (hit) return hit;
+    }
+
+    const lastBy = num(tag(e, 'LAST_AFFECTED_BY'), 0);
+    if (lastBy > 0) {
+      const ge = this.entities.get(lastBy);
+      if (ge && /^EDR_100t/i.test(ge.cardId)) {
+        const hit = pickFromGiftEntity(ge);
+        if (hit) return hit;
+      }
+    }
+
+    if (tagOn(e, 'HAS_DARK_GIFT')) {
+      return { cardId: '', name: '黑暗之赐', note: '已获黑暗之赐' };
+    }
+    return undefined;
   }
 
   private buildSide(playerEntityId: number, playerId: number, isLocal: boolean): SideState {
@@ -1383,8 +1627,22 @@ export class PowerLogParser {
     const heroEntityId = num(this.playerTagValue(playerId, 'HERO_ENTITY') ?? tag(playerEntity, 'HERO_ENTITY'), 0);
     const hero = heroEntityId ? this.entities.get(heroEntityId) : undefined;
 
+    // 预收集附魔索引，用于精确解析手牌上的黑暗之赐
+    const attachedEnchants = new Map<number, EntityState[]>();
+    if (isLocal) {
+      for (const ent of this.entities.values()) {
+        if (tag(ent, 'CARDTYPE') !== 'ENCHANTMENT') continue;
+        if (tag(ent, 'ZONE') === 'REMOVEDFROMGAME') continue;
+        const targetId = num(tag(ent, 'ATTACHED'), 0);
+        if (targetId <= 0) continue;
+        const list = attachedEnchants.get(targetId) ?? [];
+        list.push(ent);
+        attachedEnchants.set(targetId, list);
+      }
+    }
+
     const minions: MinionView[] = [];
-    const handCards: { id: number; cardId: string; cost: number; prepared: boolean }[] = [];
+    const handCards: SideState['handCards'] = [];
     let handCount = 0;
     let coinCount = 0;
     let coinMana = 0;
@@ -1393,6 +1651,8 @@ export class PowerLogParser {
     let secrets = 0;
     const auras: { cardId: string; name: string }[] = [];
     let weapon: SideState['weapon'] = null;
+    let heroPower: HeroPowerView | null = null;
+    let heroPowerEntityId = 0;
 
     for (const e of this.entities.values()) {
       if (e.id === playerEntityId || e.id === heroEntityId) continue;
@@ -1404,6 +1664,7 @@ export class PowerLogParser {
       if (zone === 'HAND') {
         handCount += 1;
         if (e.cardId) {
+          const darkGift = isLocal ? this.resolveDarkGift(e, attachedEnchants) : undefined;
           handCards.push({
             id: e.id,
             cardId: e.cardId,
@@ -1420,6 +1681,8 @@ export class PowerLogParser {
             prepared: tagOn(e, 'PREPARE'),
             enteredTurn: e.enteredTurn,
             poweredUp: tagOn(e, 'POWERED_UP'),
+            ...(darkGift ? { darkGift } : {}),
+            ...(this.isEntityCreated(e) ? { created: true } : {}),
           });
           if (isCoinCard(e.cardId)) {
             coinCount += 1;
@@ -1444,6 +1707,7 @@ export class PowerLogParser {
       if (cardType === 'MINION') {
         const maxHealth = tagNum(e, 'HEALTH', 0);
         const damage = tagNum(e, 'DAMAGE', 0);
+        const race = tag(e, 'CARDRACE') || undefined;
         minions.push({
           id: e.id,
           name: e.name,
@@ -1465,6 +1729,7 @@ export class PowerLogParser {
           cantAttack: tagOn(e, 'CANT_ATTACK') || tagOn(e, 'DORMANT'),
           spellPower: tagNum(e, 'SPELLPOWER', 0),
           canAttack: !tagOn(e, 'EXHAUSTED') && !tagOn(e, 'CANT_ATTACK') && !tagOn(e, 'DORMANT') && tagNum(e, 'ATK', 0) > 0,
+          ...(race ? { race } : {}),
         });
       } else if (cardType === 'WEAPON') {
         weapon = {
@@ -1475,6 +1740,19 @@ export class PowerLogParser {
           durability: Math.max(0, tagNum(e, 'HEALTH', 0) - tagNum(e, 'DAMAGE', 0)),
           windfury: tagOn(e, 'WINDFURY'),
           hitsHero: !/无法攻击英雄/.test(cardNote(e.cardId ?? '') ?? ''),
+        };
+      } else if (cardType === 'HERO_POWER' && e.id >= heroPowerEntityId) {
+        heroPowerEntityId = e.id;
+        const hpCardId = e.cardId ?? '';
+        const scriptNum1 = tagNum(e, 'TAG_SCRIPT_DATA_NUM_1', 0);
+        const imbueSpec = IMBUE_HERO_POWERS[hpCardId];
+        heroPower = {
+          cardId: hpCardId,
+          name: e.name || imbueSpec?.name || cardName(hpCardId) || '',
+          cost: tagNum(e, 'COST', 2),
+          exhausted: tagOn(e, 'EXHAUSTED'),
+          scriptNum1,
+          note: imbueSpec ? imbueSpec.note(scriptNum1) : cardNote(hpCardId),
         };
       }
     }
@@ -1488,6 +1766,10 @@ export class PowerLogParser {
     const used = num(this.playerTagValue(playerId, 'RESOURCES_USED'), 0);
     const temp = num(this.playerTagValue(playerId, 'TEMP_RESOURCES'), 0);
     const locked = num(this.playerTagValue(playerId, 'OVERLOAD_LOCKED'), 0);
+    const comboActive = this.playerTagValue(playerId, 'COMBO_ACTIVE') === '1';
+    const rawImbue = num(this.playerTagValue(playerId, 'IMBUE_COUNT'), 0);
+    const hpImbue = heroPower && Object.hasOwn(IMBUE_HERO_POWERS, heroPower.cardId) ? heroPower.scriptNum1 : 0;
+    const imbueCount = Math.max(rawImbue, hpImbue);
 
     return {
       playerId,
@@ -1518,6 +1800,166 @@ export class PowerLogParser {
       weapon,
       playState: this.playerTagValue(playerId, 'PLAYSTATE') ?? '',
       mulliganState: this.playerTagValue(playerId, 'MULLIGAN_STATE') ?? '',
+      comboActive,
+      imbueCount,
+      heroPower,
+    };
+  }
+
+  /** 提取当前对局的原始记牌器数据（供 `tracker.ts` 汇总剩余牌库与对手情报）。 */
+  trackerData(): TrackerRawData | null {
+    if (!this.sawCreateGame) return null;
+    if (!this.explicitLocalId && this.detectedLocalId === null) this.detectLocalByHand();
+    const localId = this.localPlayerId();
+    const foeId = localId === 1 ? 2 : 1;
+
+    const snap = this.snapshot();
+    const myClass = snap?.me.heroClass ?? '';
+    const foeClass = snap?.opponent.heroClass ?? '';
+    const myDeckCount = snap?.me.deckCount ?? 0;
+    const foeDeckCount = snap?.opponent.deckCount ?? 0;
+
+    const creatorLabelOf = (e: EntityState): string | undefined => {
+      const cid = num(tag(e, 'DISPLAYED_CREATOR') ?? tag(e, 'CREATOR'), 0);
+      if (cid <= 0) return undefined;
+      const c = this.entities.get(cid);
+      if (!c) return undefined;
+      return c.name || cardName(c.cardId ?? '') || undefined;
+    };
+
+    const toCardEvent = (e: EntityState, turnOverride?: number): TrackerCardEvent => ({
+      entityId: e.id,
+      cardId: e.cardId,
+      name: e.name || cardName(e.cardId) || e.cardId || '未知的牌',
+      cost: tagNum(e, 'COST', 0),
+      turn: turnOverride ?? e.playedTurn ?? e.enteredTurn ?? this.turn,
+      isCreated: this.isEntityCreated(e) || isCoinCard(e.cardId),
+      ...(creatorLabelOf(e) ? { creatorName: creatorLabelOf(e) } : {}),
+    });
+
+    const drawnFromDeck: TrackerCardEvent[] = [];
+    const myPlayed: TrackerCardEvent[] = [];
+    const myGraveyard: TrackerCardEvent[] = [];
+    const myKnownInDeck: TrackerCardEvent[] = [];
+    const myHandCards: TrackerRawData['me']['handCards'] = [];
+
+    const foePlayed: TrackerCardEvent[] = [];
+    const foeGraveyardMinions: TrackerCardEvent[] = [];
+    const foeGraveyardSpells: TrackerCardEvent[] = [];
+    const foeSecrets: TrackerSecretInfo[] = [];
+    const foeRevealedSecrets: TrackerCardEvent[] = [];
+    const foeHandRaw: { pos: number; slot: TrackerHandSlot }[] = [];
+
+    for (const e of this.entities.values()) {
+      const controller = num(tag(e, 'CONTROLLER'), 0);
+      if (controller !== localId && controller !== foeId) continue;
+      const ct = tag(e, 'CARDTYPE');
+      if (ct === 'GAME' || ct === 'PLAYER' || ct === 'HERO' || ct === 'HERO_POWER' || ct === 'ENCHANTMENT') continue;
+
+      const zone = tag(e, 'ZONE') ?? '';
+      const isCreated = this.isEntityCreated(e);
+
+      if (controller === localId) {
+        if (e.cardId) {
+          if (!isCreated && !isCoinCard(e.cardId) && (e.wasInDeck || e.initialZone === 'DECK') && zone !== 'DECK') {
+            drawnFromDeck.push(toCardEvent(e, e.enteredTurn ?? e.playedTurn ?? 0));
+          }
+          if (zone === 'DECK') {
+            myKnownInDeck.push(toCardEvent(e));
+          }
+          if (e.everPlayed) {
+            myPlayed.push(toCardEvent(e, e.playedTurn));
+          }
+          if (zone === 'GRAVEYARD') {
+            myGraveyard.push(toCardEvent(e, e.graveyardTurn));
+          }
+          if (zone === 'HAND') {
+            myHandCards.push({
+              entityId: e.id,
+              cardId: e.cardId,
+              name: e.name || cardName(e.cardId) || e.cardId,
+              cost: tagNum(e, 'COST', 0),
+              isCreated: isCreated || isCoinCard(e.cardId),
+            });
+          }
+        }
+        continue;
+      }
+
+      // 对手
+      if (zone === 'HAND') {
+        const enteredTurn = e.enteredTurn ?? 0;
+        const pos = tagNum(e, 'ZONE_POSITION', e.id);
+        const creatorName = creatorLabelOf(e);
+        const likelyCoin = isCoinCard(e.cardId)
+          || (!isCreated && !e.wasInDeck && e.initialZone === 'HAND' && enteredTurn === 0
+            && this.firstPlayerId !== null && this.firstPlayerId > 0 && foeId !== this.firstPlayerId);
+        const publicVisible = e.publicInHand === true && Boolean(e.cardId);
+        foeHandRaw.push({
+          pos,
+          slot: {
+            entityId: e.id,
+            enteredTurn,
+            heldTurns: Math.max(0, this.turn - enteredTurn),
+            isCoin: likelyCoin,
+            isCreated: isCreated && !likelyCoin,
+            ...(creatorName ? { creatorName } : {}),
+            ...(publicVisible ? { revealedCardId: e.cardId, revealedName: e.name || cardName(e.cardId) || '未知明牌' } : {}),
+          },
+        });
+      }
+
+      if (zone === 'SECRET') {
+        const sName = e.name || cardName(e.cardId ?? '') || '';
+        if (!/光环/.test(sName)) {
+          foeSecrets.push({
+            entityId: e.id,
+            enteredTurn: e.enteredSecretTurn ?? 0,
+            ...(e.cardId ? { cardId: e.cardId } : {}),
+            ...(sName ? { name: sName } : {}),
+          });
+        }
+      } else if (e.enteredSecretTurn !== undefined && e.cardId) {
+        const sName = e.name || cardName(e.cardId) || '';
+        if (!/光环/.test(sName)) foeRevealedSecrets.push(toCardEvent(e, e.graveyardTurn ?? e.enteredSecretTurn));
+      }
+
+      if (e.cardId && e.everPlayed) {
+        foePlayed.push(toCardEvent(e, e.playedTurn));
+      }
+      if (e.cardId && zone === 'GRAVEYARD') {
+        if (ct === 'MINION') foeGraveyardMinions.push(toCardEvent(e, e.graveyardTurn));
+        else if (ct === 'SPELL') foeGraveyardSpells.push(toCardEvent(e, e.graveyardTurn));
+      }
+    }
+
+    foeHandRaw.sort((a, b) => a.pos - b.pos || a.slot.entityId - b.slot.entityId);
+    myPlayed.sort((a, b) => a.turn - b.turn || a.entityId - b.entityId);
+    foePlayed.sort((a, b) => a.turn - b.turn || a.entityId - b.entityId);
+
+    return {
+      turn: this.turn,
+      localPlayerId: localId,
+      meta: { ...this.gameMeta },
+      me: {
+        heroClass: myClass,
+        deckCount: myDeckCount,
+        drawnFromDeck,
+        playedCards: myPlayed,
+        graveyardCards: myGraveyard,
+        knownInDeck: myKnownInDeck,
+        handCards: myHandCards,
+      },
+      opponent: {
+        heroClass: foeClass,
+        deckCount: foeDeckCount,
+        playedCards: foePlayed,
+        graveyardMinions: foeGraveyardMinions,
+        graveyardSpells: foeGraveyardSpells,
+        secrets: foeSecrets,
+        revealedSecrets: foeRevealedSecrets,
+        handCards: foeHandRaw.map((x) => x.slot),
+      },
     };
   }
 }

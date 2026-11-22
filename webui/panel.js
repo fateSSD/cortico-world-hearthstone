@@ -58,6 +58,41 @@ const TEXT = {
     thoughts: '她最近想到的',
     thoughtsEmpty: '还没写过。打完一局她可能会记一句。',
     feedback: '报 bug / 提需求',
+    calibrateBtn: '校准',
+    calibrateClose: '收起',
+    ladderStandard: '标准',
+    ladderWild: '狂野',
+    ladderTwist: '幻变',
+    rankPlaceholder: '如 钻5 2星 / 传说 #800',
+    saveRank: '存段位',
+    arenaUnder: '地下(12-3)',
+    arenaNormal: '普通(5-2)',
+    wins: '胜',
+    losses: '负',
+    saveArena: '设战绩',
+    resetArena: '新开0-0',
+    savedOk: '已更新',
+    trackerTitle: '记牌器',
+    importDeck: '导代码',
+    clearDeck: '清代码',
+    deckPlaceholder: '粘贴炉石卡组代码(AAE...)或游戏内分享全文',
+    doImport: '导入',
+    tabMy: '我方牌库',
+    tabOpp: '对手已出',
+    tabHand: '对手手牌',
+    noDeckHint: '未导入卡组代码（仅显示已见出牌，不编造牌库底）',
+    mismatchHint: '已导入卡组与本局职业不符，已忽略',
+    deckPlayed: '已出',
+    deckEmpty: '牌库空了',
+    noPlaysYet: '对手暂未出牌',
+    noOppHand: '对手空手或未在对局',
+    secretsCount: (n) => `奥秘 ${n} 个`,
+    oppCreated: '衍生',
+    oppDraw: '抽',
+    oppCoin: '硬币',
+    heldTurns: (n) => `留${n}回合`,
+    burstBadge: (dmg) => `余直伤 ${dmg}`,
+    highlanderReady: '宇宙✓',
   },
   en: {
     helpTitle: 'What do the three dots next to the extension name mean?',
@@ -108,6 +143,41 @@ const TEXT = {
     thoughts: 'On her mind lately',
     thoughtsEmpty: 'Nothing yet. She writes one after a match now and then.',
     feedback: 'Report a bug / ask for a feature',
+    calibrateBtn: 'Calibrate',
+    calibrateClose: 'Hide',
+    ladderStandard: 'Standard',
+    ladderWild: 'Wild',
+    ladderTwist: 'Twist',
+    rankPlaceholder: 'e.g. 钻5 2星 / 传说 #800',
+    saveRank: 'Save rank',
+    arenaUnder: 'Underground (12-3)',
+    arenaNormal: 'Arena (5-2)',
+    wins: 'W',
+    losses: 'L',
+    saveArena: 'Set record',
+    resetArena: 'New 0-0',
+    savedOk: 'Updated',
+    trackerTitle: 'Deck Tracker',
+    importDeck: 'Import code',
+    clearDeck: 'Clear',
+    deckPlaceholder: 'Paste Blizzard deckstring (AAE...) or full deck text',
+    doImport: 'Import',
+    tabMy: 'My Deck',
+    tabOpp: 'Opp Played',
+    tabHand: 'Opp Hand',
+    noDeckHint: 'No deck code imported (only known seen cards shown)',
+    mismatchHint: 'Imported deck class mismatches match, ignored',
+    deckPlayed: 'Played',
+    deckEmpty: 'Deck empty',
+    noPlaysYet: 'No opponent plays yet',
+    noOppHand: 'Empty hand or not in match',
+    secretsCount: (n) => `${n} secrets`,
+    oppCreated: 'Created',
+    oppDraw: 'Draw',
+    oppCoin: 'Coin',
+    heldTurns: (n) => `held ${n}T`,
+    burstBadge: (dmg) => `${dmg} dmg left`,
+    highlanderReady: 'No Dupes',
   },
 };
 
@@ -192,12 +262,124 @@ function mount(ctx) {
   const statusChip = el(doc, 'span', 'hs-chip', '—');
   head.append(headText, statusChip);
 
+  // 模式与战绩进度条（可折叠校准）
+  const progWrap = el(doc, 'div', 'hs-progress');
+  const progBar = el(doc, 'div', 'hs-progress-bar');
+  const progBrief = el(doc, 'span', 'hs-progress-brief', '—');
+  const calToggle = el(doc, 'button', 'hs-mini-btn', t.calibrateBtn);
+  calToggle.type = 'button';
+  progBar.append(progBrief, calToggle);
+
+  const calForm = el(doc, 'div', 'hs-prog-form');
+  calForm.hidden = true;
+  const rankRow = el(doc, 'div', 'hs-form-row');
+  const rankFmt = el(doc, 'select', 'hs-input hs-select');
+  for (const [val, lbl] of [['standard', t.ladderStandard], ['wild', t.ladderWild], ['twist', t.ladderTwist]]) {
+    const opt = el(doc, 'option', null, lbl);
+    opt.value = val;
+    rankFmt.append(opt);
+  }
+  const rankInput = el(doc, 'input', 'hs-input hs-rank-input');
+  rankInput.type = 'text';
+  rankInput.placeholder = t.rankPlaceholder;
+  const rankBtn = el(doc, 'button', 'hs-mini-btn is-primary', t.saveRank);
+  rankBtn.type = 'button';
+  rankRow.append(rankFmt, rankInput, rankBtn);
+
+  const arenaRow = el(doc, 'div', 'hs-form-row');
+  const arenaModeSel = el(doc, 'select', 'hs-input hs-select');
+  for (const [val, lbl] of [['underground', t.arenaUnder], ['arena', t.arenaNormal]]) {
+    const opt = el(doc, 'option', null, lbl);
+    opt.value = val;
+    arenaModeSel.append(opt);
+  }
+  const arenaWins = el(doc, 'input', 'hs-input hs-num-input');
+  arenaWins.type = 'number';
+  arenaWins.min = '0';
+  arenaWins.max = '12';
+  arenaWins.value = '0';
+  const arenaLosses = el(doc, 'input', 'hs-input hs-num-input');
+  arenaLosses.type = 'number';
+  arenaLosses.min = '0';
+  arenaLosses.max = '3';
+  arenaLosses.value = '0';
+  const arenaSaveBtn = el(doc, 'button', 'hs-mini-btn', t.saveArena);
+  arenaSaveBtn.type = 'button';
+  const arenaResetBtn = el(doc, 'button', 'hs-mini-btn', t.resetArena);
+  arenaResetBtn.type = 'button';
+  arenaRow.append(
+    arenaModeSel,
+    arenaWins, el(doc, 'span', 'hs-form-unit', t.wins),
+    arenaLosses, el(doc, 'span', 'hs-form-unit', t.losses),
+    arenaSaveBtn, arenaResetBtn,
+  );
+  const calMsg = el(doc, 'div', 'hs-form-msg');
+  calForm.append(rankRow, arenaRow, calMsg);
+  progWrap.append(progBar, calForm);
+
+  calToggle.addEventListener('click', () => {
+    calForm.hidden = !calForm.hidden;
+    calToggle.textContent = calForm.hidden ? t.calibrateBtn : t.calibrateClose;
+  }, { signal: ctx.signal });
+
   const stats = el(doc, 'div', 'hs-stats');
 
   const button = el(doc, 'button', 'hs-ask', t.ask);
   button.type = 'button';
 
   const card = el(doc, 'div', 'hs-card hs-empty', t.empty);
+
+  // 记牌器卡片（我方牌库 / 对手已出 / 对手手牌）
+  const trackerBox = el(doc, 'div', 'hs-tracker');
+  const trackerHead = el(doc, 'div', 'hs-tracker-head');
+  const trackerTitle = el(doc, 'span', 'hs-tracker-title', t.trackerTitle);
+  const trackerActions = el(doc, 'div', 'hs-tracker-actions');
+  const importToggle = el(doc, 'button', 'hs-mini-btn', t.importDeck);
+  importToggle.type = 'button';
+  const clearDeckBtn = el(doc, 'button', 'hs-mini-btn', t.clearDeck);
+  clearDeckBtn.type = 'button';
+  clearDeckBtn.hidden = true;
+  trackerActions.append(importToggle, clearDeckBtn);
+  trackerHead.append(trackerTitle, trackerActions);
+
+  const deckForm = el(doc, 'div', 'hs-deck-form');
+  deckForm.hidden = true;
+  const deckTextarea = el(doc, 'textarea', 'hs-input hs-deck-ta');
+  deckTextarea.rows = 3;
+  deckTextarea.placeholder = t.deckPlaceholder;
+  const deckBtns = el(doc, 'div', 'hs-form-row');
+  const deckImportBtn = el(doc, 'button', 'hs-mini-btn is-primary', t.doImport);
+  deckImportBtn.type = 'button';
+  const deckMsg = el(doc, 'div', 'hs-form-msg');
+  deckBtns.append(deckImportBtn, deckMsg);
+  deckForm.append(deckTextarea, deckBtns);
+
+  importToggle.addEventListener('click', () => {
+    deckForm.hidden = !deckForm.hidden;
+    deckMsg.textContent = '';
+  }, { signal: ctx.signal });
+
+  const matchupRow = el(doc, 'div', 'hs-tracker-matchup');
+  matchupRow.hidden = true;
+
+  let activeTab = 'my';
+  const tabRow = el(doc, 'div', 'hs-tabs');
+  const tabBtns = {};
+  for (const [k, label] of [['my', t.tabMy], ['opp', t.tabOpp], ['hand', t.tabHand]]) {
+    const b = el(doc, 'button', `hs-tab${k === activeTab ? ' is-on' : ''}`, label);
+    b.type = 'button';
+    b.addEventListener('click', () => {
+      activeTab = k;
+      for (const [key, node] of Object.entries(tabBtns)) {
+        node.classList.toggle('is-on', key === activeTab);
+      }
+      if (latestTracker) renderTrackerBody(latestTracker, true);
+    }, { signal: ctx.signal });
+    tabBtns[k] = b;
+    tabRow.append(b);
+  }
+  const trackerList = el(doc, 'div', 'hs-tracker-list');
+  trackerBox.append(trackerHead, deckForm, matchupRow, tabRow, trackerList);
 
   const switches = el(doc, 'div', 'hs-switches');
 
@@ -286,10 +468,92 @@ function mount(ctx) {
   /* 灯说明放在最底下 —— 用户是「看到灰点、滚下来找答案」才需要它。 */
   const helpBox = lampsHelp(doc, t);
 
-  wrap.append(head, stats, button, card, voiceRow, switches, selfPlayRow, figureRow, thoughtsRow, helpBox, footer);
+  wrap.append(head, progWrap, stats, button, card, trackerBox, voiceRow, switches, selfPlayRow, figureRow, thoughtsRow, helpBox, footer);
 
   let busy = false;
   let lastKey = '';
+  let latestTracker = null;
+  let trackerSig = '';
+
+  const setMsg = (node, msg, isErr = false) => {
+    node.textContent = msg || '';
+    node.className = `hs-form-msg${isErr ? ' is-err' : msg ? ' is-ok' : ''}`;
+  };
+
+  rankBtn.addEventListener('click', async () => {
+    rankBtn.disabled = true;
+    setMsg(calMsg, '');
+    try {
+      const res = await ctx.invoke('setRank', [rankFmt.value, rankInput.value]);
+      apply(res);
+      if (res && res.ok === false) setMsg(calMsg, res.error || t.fail, true);
+      else setMsg(calMsg, t.savedOk);
+    } catch (err) {
+      setMsg(calMsg, err instanceof Error ? err.message : String(err), true);
+    } finally {
+      rankBtn.disabled = false;
+    }
+  }, { signal: ctx.signal });
+
+  arenaSaveBtn.addEventListener('click', async () => {
+    arenaSaveBtn.disabled = true;
+    setMsg(calMsg, '');
+    try {
+      const res = await ctx.invoke('setArena', [Number(arenaWins.value) || 0, Number(arenaLosses.value) || 0, arenaModeSel.value]);
+      apply(res);
+      setMsg(calMsg, t.savedOk);
+    } catch (err) {
+      setMsg(calMsg, err instanceof Error ? err.message : String(err), true);
+    } finally {
+      arenaSaveBtn.disabled = false;
+    }
+  }, { signal: ctx.signal });
+
+  arenaResetBtn.addEventListener('click', async () => {
+    arenaResetBtn.disabled = true;
+    setMsg(calMsg, '');
+    try {
+      const res = await ctx.invoke('resetArena', [arenaModeSel.value]);
+      arenaWins.value = '0';
+      arenaLosses.value = '0';
+      apply(res);
+      setMsg(calMsg, t.savedOk);
+    } catch (err) {
+      setMsg(calMsg, err instanceof Error ? err.message : String(err), true);
+    } finally {
+      arenaResetBtn.disabled = false;
+    }
+  }, { signal: ctx.signal });
+
+  deckImportBtn.addEventListener('click', async () => {
+    deckImportBtn.disabled = true;
+    setMsg(deckMsg, '');
+    try {
+      const res = await ctx.invoke('importDeck', [deckTextarea.value]);
+      apply(res);
+      if (res && res.ok === false) {
+        setMsg(deckMsg, res.error || t.fail, true);
+      } else {
+        deckTextarea.value = '';
+        deckForm.hidden = true;
+      }
+    } catch (err) {
+      setMsg(deckMsg, err instanceof Error ? err.message : String(err), true);
+    } finally {
+      deckImportBtn.disabled = false;
+    }
+  }, { signal: ctx.signal });
+
+  clearDeckBtn.addEventListener('click', async () => {
+    clearDeckBtn.disabled = true;
+    try {
+      apply(await ctx.invoke('clearDeck', []));
+    } catch (err) {
+      showError(err);
+    } finally {
+      clearDeckBtn.disabled = false;
+    }
+  }, { signal: ctx.signal });
 
   const chip = (state) => {
     statusChip.dataset.state = state;
@@ -453,11 +717,115 @@ function mount(ctx) {
     }
   };
 
+  const renderProgress = (status) => {
+    const p = status.progress;
+    if (!p) { progWrap.hidden = true; return; }
+    progWrap.hidden = false;
+    progBrief.textContent = p.brief || '—';
+    const editing = Boolean(doc?.activeElement && calForm.contains?.(doc.activeElement));
+    if (!editing && calForm.hidden) {
+      if (p.ladderFormat) rankFmt.value = p.ladderFormat;
+      if (p.arenaMode) arenaModeSel.value = p.arenaMode;
+    }
+  };
+
+  const renderTrackerBody = (tr, force = false) => {
+    const sig = `${activeTab}|${JSON.stringify(tr)}`;
+    if (!force && sig === trackerSig) return;
+    trackerSig = sig;
+    trackerList.replaceChildren();
+
+    const rowNode = (cost, name, right, extraCls) => {
+      const r = el(doc, 'div', `hs-tr-row${extraCls ? ` ${extraCls}` : ''}`);
+      if (cost !== null) r.append(el(doc, 'span', 'hs-tr-cost', String(cost)));
+      r.append(el(doc, 'span', 'hs-tr-name', name));
+      if (right) r.append(el(doc, 'span', 'hs-tr-right', right));
+      return r;
+    };
+
+    if (activeTab === 'my') {
+      if (tr.deckSource === 'none') {
+        trackerList.append(el(doc, 'div', 'hs-tr-hint', tr.deckMismatch ? t.mismatchHint : t.noDeckHint));
+        for (const p of tr.myPlayed || []) {
+          trackerList.append(rowNode(p.cost, p.name, `${t.deckPlayed}×${p.count}`));
+        }
+        return;
+      }
+      if (!tr.myRemaining || !tr.myRemaining.length) {
+        trackerList.append(el(doc, 'div', 'hs-tr-hint', t.deckEmpty));
+        return;
+      }
+      for (const c of tr.myRemaining) {
+        const probText = c.prob > 0 ? ` ${Math.round(c.prob * 100)}%` : '';
+        const right = `×${c.left}${probText}`;
+        const label = c.extraCreated ? `${c.name} [洗]` : c.name;
+        trackerList.append(rowNode(c.cost, label, right));
+      }
+      return;
+    }
+
+    if (activeTab === 'opp') {
+      if (!tr.oppPlayed || !tr.oppPlayed.length) {
+        trackerList.append(el(doc, 'div', 'hs-tr-hint', t.noPlaysYet));
+        return;
+      }
+      for (const p of tr.oppPlayed) {
+        const right = `${p.count > 1 ? `×${p.count} ` : ''}${p.created ? t.oppCreated : ''}`.trim();
+        trackerList.append(rowNode(p.cost, p.name, right, p.created ? 'is-created' : ''));
+      }
+      return;
+    }
+
+    // hand tab
+    if (tr.oppSecrets > 0) {
+      trackerList.append(el(doc, 'div', 'hs-tr-secret', t.secretsCount(tr.oppSecrets)));
+    }
+    if (!tr.oppHand || !tr.oppHand.length) {
+      trackerList.append(el(doc, 'div', 'hs-tr-hint', t.noOppHand));
+      return;
+    }
+    for (const h of tr.oppHand) {
+      const label = h.revealedName
+        ? `#${h.slot} ${h.revealedName} [明牌]`
+        : h.isCoin
+          ? `#${h.slot} ${t.oppCoin}`
+          : `#${h.slot} T${h.enteredTurn} ${h.created ? (h.creatorName ? `${t.oppCreated}(${h.creatorName})` : t.oppCreated) : t.oppDraw}`;
+      trackerList.append(rowNode(null, label, t.heldTurns(h.age), h.created ? 'is-created' : ''));
+    }
+  };
+
+  const renderTracker = (status) => {
+    const tr = status.tracker;
+    latestTracker = tr || null;
+    if (!tr) { trackerBox.hidden = true; return; }
+    trackerBox.hidden = false;
+
+    const badges = [];
+    if (tr.deckName) badges.push(tr.deckName);
+    if (tr.inGame) badges.push(`${tr.myRemainingCount}`);
+    if (tr.remainingBurstDamage > 0) badges.push(t.burstBadge(tr.remainingBurstDamage));
+    if (tr.hasDuplicates === false) badges.push(t.highlanderReady);
+    trackerTitle.textContent = badges.length ? `${t.trackerTitle} · ${badges.join(' · ')}` : t.trackerTitle;
+
+    // 只要存在已导入的卡组代码（哪怕当前局职业不符导致 deckSource 退回 'none'），就保留「清代码」入口
+    clearDeckBtn.hidden = !(tr.hasImportedDeck ?? (tr.deckSource === 'imported' || tr.deckMismatch));
+    if (tr.matchupBrief) {
+      matchupRow.hidden = false;
+      matchupRow.textContent = tr.matchupBrief;
+    } else {
+      matchupRow.hidden = true;
+      matchupRow.textContent = '';
+    }
+    renderTrackerBody(tr);
+  };
+
   const apply = (payload) => {
     if (!payload || !payload.status) return;
     renderHead(payload.status);
+    renderProgress(payload.status);
     renderStats(payload.status);
     renderSwitches(payload.status.auto);
+    renderTracker(payload.status);
     renderVoice(payload.status);
     renderThoughts(payload.status.thoughts);
     renderFigure(payload.figure);
