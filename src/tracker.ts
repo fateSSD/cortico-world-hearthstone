@@ -63,6 +63,10 @@ export interface TrackerSnapshot {
   opponent: {
     heroClass: string;
     deckCount: number;
+    deckSource: 'imported' | 'none';
+    deckName: string;
+    deckMismatch: boolean;
+    remainingDeck: RemainingDeckItem[];
     initialPlayed: TallyCardItem[];
     createdPlayed: TallyCardItem[];
     keyCardsUsed: TallyCardItem[];
@@ -115,7 +119,7 @@ function isKeyCard(item: TallyCardItem): boolean {
 
 export function buildTrackerSnapshot(
   raw: TrackerRawData,
-  opts: { importedDeck?: DecodedDeck | null; arenaDeck?: readonly string[] } = {},
+  opts: { importedDeck?: DecodedDeck | null; oppImportedDeck?: DecodedDeck | null; arenaDeck?: readonly string[] } = {},
 ): TrackerSnapshot {
   const isArena = arenaModeFromMeta(raw.meta) !== null;
   let deckSource: TrackerSnapshot['deckSource'] = 'none';
@@ -262,6 +266,42 @@ export function buildTrackerSnapshot(
   ]);
   const keyCardsUsed = allFoeRevealed.filter(isKeyCard);
 
+  let oppDeckSource: 'imported' | 'none' = 'none';
+  let oppDeckName = '';
+  let oppDeckMismatch = false;
+  const oppRemainingDeck: RemainingDeckItem[] = [];
+  if (!isArena && opts.oppImportedDeck && opts.oppImportedDeck.cards.length > 0) {
+    const oppImp = opts.oppImportedDeck;
+    if (oppImp.heroClass && raw.opponent.heroClass && oppImp.heroClass !== raw.opponent.heroClass) {
+      oppDeckMismatch = true;
+    } else {
+      oppDeckSource = 'imported';
+      oppDeckName = oppImp.name;
+      const oppPlayedMap = new Map<string, number>();
+      for (const ev of initialPlayed) {
+        const k = bareId(ev.cardId) || ev.name;
+        oppPlayedMap.set(k, (oppPlayedMap.get(k) ?? 0) + ev.count);
+      }
+      const oppTotalDeck = Math.max(0, raw.opponent.deckCount);
+      for (const c of oppImp.cards) {
+        const k = bareId(c.cardId) || c.name;
+        const used = oppPlayedMap.get(k) ?? 0;
+        const left = Math.max(0, c.count - used);
+        if (left <= 0) continue;
+        oppRemainingDeck.push({
+          cardId: c.cardId,
+          name: c.name,
+          cost: c.cost,
+          left,
+          total: c.count,
+          note: c.note,
+          drawProb: oppTotalDeck > 0 ? Math.min(1, left / oppTotalDeck) : 0,
+        });
+      }
+      oppRemainingDeck.sort((a, b) => a.cost - b.cost || a.name.localeCompare(b.name, 'zh'));
+    }
+  }
+
   return {
     turn: raw.turn,
     meta: raw.meta,
@@ -285,6 +325,10 @@ export function buildTrackerSnapshot(
     opponent: {
       heroClass: raw.opponent.heroClass,
       deckCount: raw.opponent.deckCount,
+      deckSource: oppDeckSource,
+      deckName: oppDeckName,
+      deckMismatch: oppDeckMismatch,
+      remainingDeck: oppRemainingDeck,
       initialPlayed,
       createdPlayed,
       keyCardsUsed,

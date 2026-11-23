@@ -47,12 +47,39 @@ export interface PanelProgressView {
   arenaText: string;
 }
 
+export interface SavedDeckSummary {
+  id: string;
+  name: string;
+  heroClass: string;
+  active: boolean;
+}
+
 export interface PanelTrackerView {
   inGame: boolean;
   hasImportedDeck?: boolean;
   deckSource: 'imported' | 'arena' | 'none';
   deckName: string;
   deckMismatch: boolean;
+  myClass?: string;
+  oppClass?: string;
+  oppDeckCount?: number;
+  oppHandCount?: number;
+  savedDecks?: SavedDeckSummary[];
+  activeDeckId?: string | null;
+  hasOppImportedDeck?: boolean;
+  oppDeckSource?: 'imported' | 'none';
+  oppDeckName?: string;
+  oppDeckMismatch?: boolean;
+  oppSavedDecks?: SavedDeckSummary[];
+  oppActiveDeckId?: string | null;
+  oppRemaining?: {
+    cardId: string;
+    name: string;
+    cost: number;
+    left: number;
+    total: number;
+    prob: number;
+  }[];
   myRemainingCount: number;
   myRemaining: {
     cardId: string;

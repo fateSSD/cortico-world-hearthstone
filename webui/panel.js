@@ -73,18 +73,28 @@ const TEXT = {
     resetArena: '新开0-0',
     savedOk: '已更新',
     trackerTitle: '记牌器',
+    myTrackerTitle: '我方记牌器',
+    oppTrackerTitle: '对手记牌器',
     importDeck: '导代码',
     clearDeck: '清代码',
+    deckNamePlaceholder: '可选：给这套牌起个名',
     deckPlaceholder: '粘贴炉石卡组代码(AAE...)或游戏内分享全文',
-    doImport: '导入',
-    tabMy: '我方牌库',
+    doImport: '保存并启用',
+    tabMy: '剩余牌库',
+    tabMyPlayed: '我方已出',
     tabOpp: '对手已出',
+    tabOppDeck: '对手牌库',
     tabHand: '对手手牌',
     noDeckHint: '未导入卡组代码（仅显示已见出牌，不编造牌库底）',
+    noOppDeckHint: '未导入对手卡组代码（可粘贴对方代码看剩余牌）',
     mismatchHint: '已导入卡组与本局职业不符，已忽略',
     deckPlayed: '已出',
     deckEmpty: '牌库空了',
+    noMyPlaysYet: '我方暂未出牌',
     noPlaysYet: '对手暂未出牌',
+    deleteDeckTitle: '删除此卡组',
+    searchOppDeck: '搜卡组',
+    searchingOppDeck: '搜索中…',
     noOppHand: '对手空手或未在对局',
     secretsCount: (n) => `奥秘 ${n} 个`,
     oppCreated: '衍生',
@@ -158,18 +168,28 @@ const TEXT = {
     resetArena: 'New 0-0',
     savedOk: 'Updated',
     trackerTitle: 'Deck Tracker',
+    myTrackerTitle: 'My Tracker',
+    oppTrackerTitle: 'Opp Tracker',
     importDeck: 'Import code',
     clearDeck: 'Clear',
+    deckNamePlaceholder: 'Optional deck name',
     deckPlaceholder: 'Paste Blizzard deckstring (AAE...) or full deck text',
-    doImport: 'Import',
-    tabMy: 'My Deck',
+    doImport: 'Save & Use',
+    tabMy: 'Remaining',
+    tabMyPlayed: 'My Played',
     tabOpp: 'Opp Played',
+    tabOppDeck: 'Opp Deck',
     tabHand: 'Opp Hand',
     noDeckHint: 'No deck code imported (only known seen cards shown)',
+    noOppDeckHint: 'No opponent deck code imported',
     mismatchHint: 'Imported deck class mismatches match, ignored',
     deckPlayed: 'Played',
     deckEmpty: 'Deck empty',
+    noMyPlaysYet: 'No plays yet',
     noPlaysYet: 'No opponent plays yet',
+    deleteDeckTitle: 'Delete deck',
+    searchOppDeck: 'Auto Search',
+    searchingOppDeck: 'Searching…',
     noOppHand: 'Empty hand or not in match',
     secretsCount: (n) => `${n} secrets`,
     oppCreated: 'Created',
@@ -329,57 +349,159 @@ function mount(ctx) {
 
   const card = el(doc, 'div', 'hs-card hs-empty', t.empty);
 
-  // 记牌器卡片（我方牌库 / 对手已出 / 对手手牌）
-  const trackerBox = el(doc, 'div', 'hs-tracker');
-  const trackerHead = el(doc, 'div', 'hs-tracker-head');
-  const trackerTitle = el(doc, 'span', 'hs-tracker-title', t.trackerTitle);
-  const trackerActions = el(doc, 'div', 'hs-tracker-actions');
-  const importToggle = el(doc, 'button', 'hs-mini-btn', t.importDeck);
-  importToggle.type = 'button';
-  const clearDeckBtn = el(doc, 'button', 'hs-mini-btn', t.clearDeck);
-  clearDeckBtn.type = 'button';
-  clearDeckBtn.hidden = true;
-  trackerActions.append(importToggle, clearDeckBtn);
-  trackerHead.append(trackerTitle, trackerActions);
+  const createDeckImporter = (importMethod, clearMethod) => {
+    const actions = el(doc, 'div', 'hs-tracker-actions');
+    const importBtn = el(doc, 'button', 'hs-mini-btn', t.importDeck);
+    importBtn.type = 'button';
+    const clearBtn = el(doc, 'button', 'hs-mini-btn', t.clearDeck);
+    clearBtn.type = 'button';
+    clearBtn.hidden = true;
+    actions.append(importBtn, clearBtn);
 
-  const deckForm = el(doc, 'div', 'hs-deck-form');
-  deckForm.hidden = true;
-  const deckTextarea = el(doc, 'textarea', 'hs-input hs-deck-ta');
-  deckTextarea.rows = 3;
-  deckTextarea.placeholder = t.deckPlaceholder;
-  const deckBtns = el(doc, 'div', 'hs-form-row');
-  const deckImportBtn = el(doc, 'button', 'hs-mini-btn is-primary', t.doImport);
-  deckImportBtn.type = 'button';
-  const deckMsg = el(doc, 'div', 'hs-form-msg');
-  deckBtns.append(deckImportBtn, deckMsg);
-  deckForm.append(deckTextarea, deckBtns);
+    const bar = el(doc, 'div', 'hs-deck-bar');
+    bar.hidden = true;
 
-  importToggle.addEventListener('click', () => {
-    deckForm.hidden = !deckForm.hidden;
-    deckMsg.textContent = '';
+    const form = el(doc, 'div', 'hs-deck-form');
+    form.hidden = true;
+    const nameInput = el(doc, 'input', 'hs-input');
+    nameInput.type = 'text';
+    nameInput.placeholder = t.deckNamePlaceholder;
+    const ta = el(doc, 'textarea', 'hs-input hs-deck-ta');
+    ta.rows = 3;
+    ta.placeholder = t.deckPlaceholder;
+    const btns = el(doc, 'div', 'hs-form-row');
+    const submitBtn = el(doc, 'button', 'hs-mini-btn is-primary', t.doImport);
+    submitBtn.type = 'button';
+    const msg = el(doc, 'div', 'hs-form-msg');
+    btns.append(submitBtn, msg);
+    form.append(nameInput, ta, btns);
+
+    importBtn.addEventListener('click', () => {
+      form.hidden = !form.hidden;
+      msg.textContent = '';
+    }, { signal: ctx.signal });
+
+    submitBtn.addEventListener('click', async () => {
+      submitBtn.disabled = true;
+      setMsg(msg, '');
+      try {
+        const res = await ctx.invoke(importMethod, [ta.value, nameInput.value]);
+        apply(res);
+        if (res && res.ok === false) {
+          setMsg(msg, res.error || t.fail, true);
+        } else {
+          ta.value = '';
+          nameInput.value = '';
+          form.hidden = true;
+        }
+      } catch (err) {
+        setMsg(msg, err instanceof Error ? err.message : String(err), true);
+      } finally {
+        submitBtn.disabled = false;
+      }
+    }, { signal: ctx.signal });
+
+    clearBtn.addEventListener('click', async () => {
+      clearBtn.disabled = true;
+      try {
+        apply(await ctx.invoke(clearMethod, []));
+      } catch (err) {
+        showError(err);
+      } finally {
+        clearBtn.disabled = false;
+      }
+    }, { signal: ctx.signal });
+
+    return { actions, bar, form, clearBtn };
+  };
+
+  // 双边独立记牌器容器：我方记牌器（含多卡组保存/切换） + 对手记牌器（同样支持导代码/清代码）
+  const trackersGrid = el(doc, 'div', 'hs-trackers');
+
+  const myTrackerBox = el(doc, 'div', 'hs-tracker hs-tracker-me');
+  const myTrackerHead = el(doc, 'div', 'hs-tracker-head');
+  const myTrackerTitle = el(doc, 'span', 'hs-tracker-title', t.myTrackerTitle);
+  const myDeckUi = createDeckImporter('importDeck', 'clearDeck');
+  myTrackerHead.append(myTrackerTitle, myDeckUi.actions);
+
+  let activeMyTab = 'rem';
+  const myTabRow = el(doc, 'div', 'hs-tabs');
+  const myTabBtns = {};
+  for (const [k, label] of [['rem', t.tabMy], ['played', t.tabMyPlayed]]) {
+    const b = el(doc, 'button', `hs-tab${k === activeMyTab ? ' is-on' : ''}`, label);
+    b.type = 'button';
+    b.addEventListener('click', () => {
+      activeMyTab = k;
+      for (const [key, node] of Object.entries(myTabBtns)) {
+        node.classList.toggle('is-on', key === activeMyTab);
+      }
+      if (latestTracker) renderMyTrackerBody(latestTracker, true);
+    }, { signal: ctx.signal });
+    myTabBtns[k] = b;
+    myTabRow.append(b);
+  }
+  const myTrackerList = el(doc, 'div', 'hs-tracker-list');
+  myTrackerBox.append(myTrackerHead, myDeckUi.bar, myDeckUi.form, myTabRow, myTrackerList);
+
+  const oppTrackerBox = el(doc, 'div', 'hs-tracker hs-tracker-opp');
+  const oppTrackerHead = el(doc, 'div', 'hs-tracker-head');
+  const oppTrackerTitle = el(doc, 'span', 'hs-tracker-title', t.oppTrackerTitle);
+  const oppDeckUi = createDeckImporter('importOppDeck', 'clearOppDeck');
+  const searchOppBtn = el(doc, 'button', 'hs-mini-btn', t.searchOppDeck);
+  searchOppBtn.type = 'button';
+  oppDeckUi.actions.prepend(searchOppBtn);
+  oppTrackerHead.append(oppTrackerTitle, oppDeckUi.actions);
+
+  const oppSearchMsg = el(doc, 'div', 'hs-form-msg');
+  oppSearchMsg.hidden = true;
+  searchOppBtn.addEventListener('click', async () => {
+    if (searchOppBtn.disabled) return;
+    searchOppBtn.disabled = true;
+    searchOppBtn.textContent = t.searchingOppDeck;
+    oppSearchMsg.hidden = true;
+    try {
+      const res = await ctx.invoke('searchOppDeck', []);
+      apply(res);
+      if (res && res.ok === false) {
+        oppSearchMsg.hidden = false;
+        setMsg(oppSearchMsg, res.error || t.fail, true);
+      } else if (res && res.message) {
+        oppSearchMsg.hidden = false;
+        setMsg(oppSearchMsg, res.message, false);
+        ctx.timeout(() => { oppSearchMsg.hidden = true; }, 4500);
+      }
+    } catch (err) {
+      oppSearchMsg.hidden = false;
+      setMsg(oppSearchMsg, err instanceof Error ? err.message : String(err), true);
+    } finally {
+      searchOppBtn.textContent = t.searchOppDeck;
+      searchOppBtn.disabled = false;
+    }
   }, { signal: ctx.signal });
 
   const matchupRow = el(doc, 'div', 'hs-tracker-matchup');
   matchupRow.hidden = true;
 
-  let activeTab = 'my';
-  const tabRow = el(doc, 'div', 'hs-tabs');
-  const tabBtns = {};
-  for (const [k, label] of [['my', t.tabMy], ['opp', t.tabOpp], ['hand', t.tabHand]]) {
-    const b = el(doc, 'button', `hs-tab${k === activeTab ? ' is-on' : ''}`, label);
+  let activeOppTab = 'opp';
+  const oppTabRow = el(doc, 'div', 'hs-tabs');
+  const oppTabBtns = {};
+  for (const [k, label] of [['opp', t.tabOpp], ['deck', t.tabOppDeck], ['hand', t.tabHand]]) {
+    const b = el(doc, 'button', `hs-tab${k === activeOppTab ? ' is-on' : ''}`, label);
     b.type = 'button';
     b.addEventListener('click', () => {
-      activeTab = k;
-      for (const [key, node] of Object.entries(tabBtns)) {
-        node.classList.toggle('is-on', key === activeTab);
+      activeOppTab = k;
+      for (const [key, node] of Object.entries(oppTabBtns)) {
+        node.classList.toggle('is-on', key === activeOppTab);
       }
-      if (latestTracker) renderTrackerBody(latestTracker, true);
+      if (latestTracker) renderOppTrackerBody(latestTracker, true);
     }, { signal: ctx.signal });
-    tabBtns[k] = b;
-    tabRow.append(b);
+    oppTabBtns[k] = b;
+    oppTabRow.append(b);
   }
-  const trackerList = el(doc, 'div', 'hs-tracker-list');
-  trackerBox.append(trackerHead, deckForm, matchupRow, tabRow, trackerList);
+  const oppTrackerList = el(doc, 'div', 'hs-tracker-list');
+  oppTrackerBox.append(oppTrackerHead, oppSearchMsg, oppDeckUi.bar, oppDeckUi.form, matchupRow, oppTabRow, oppTrackerList);
+
+  trackersGrid.append(myTrackerBox, oppTrackerBox);
 
   const switches = el(doc, 'div', 'hs-switches');
 
@@ -468,12 +590,15 @@ function mount(ctx) {
   /* 灯说明放在最底下 —— 用户是「看到灰点、滚下来找答案」才需要它。 */
   const helpBox = lampsHelp(doc, t);
 
-  wrap.append(head, progWrap, stats, button, card, trackerBox, voiceRow, switches, selfPlayRow, figureRow, thoughtsRow, helpBox, footer);
+  wrap.append(head, progWrap, stats, button, card, trackersGrid, voiceRow, switches, selfPlayRow, figureRow, thoughtsRow, helpBox, footer);
 
   let busy = false;
   let lastKey = '';
   let latestTracker = null;
-  let trackerSig = '';
+  let myTrackerSig = '';
+  let oppTrackerSig = '';
+  let myDeckBarSig = '';
+  let oppDeckBarSig = '';
 
   const setMsg = (node, msg, isErr = false) => {
     node.textContent = msg || '';
@@ -525,35 +650,7 @@ function mount(ctx) {
     }
   }, { signal: ctx.signal });
 
-  deckImportBtn.addEventListener('click', async () => {
-    deckImportBtn.disabled = true;
-    setMsg(deckMsg, '');
-    try {
-      const res = await ctx.invoke('importDeck', [deckTextarea.value]);
-      apply(res);
-      if (res && res.ok === false) {
-        setMsg(deckMsg, res.error || t.fail, true);
-      } else {
-        deckTextarea.value = '';
-        deckForm.hidden = true;
-      }
-    } catch (err) {
-      setMsg(deckMsg, err instanceof Error ? err.message : String(err), true);
-    } finally {
-      deckImportBtn.disabled = false;
-    }
-  }, { signal: ctx.signal });
-
-  clearDeckBtn.addEventListener('click', async () => {
-    clearDeckBtn.disabled = true;
-    try {
-      apply(await ctx.invoke('clearDeck', []));
-    } catch (err) {
-      showError(err);
-    } finally {
-      clearDeckBtn.disabled = false;
-    }
-  }, { signal: ctx.signal });
+  // 多卡组导入/清空事件已由 createDeckImporter 统一绑定
 
   const chip = (state) => {
     statusChip.dataset.state = state;
@@ -729,59 +826,89 @@ function mount(ctx) {
     }
   };
 
-  const renderTrackerBody = (tr, force = false) => {
-    const sig = `${activeTab}|${JSON.stringify(tr)}`;
-    if (!force && sig === trackerSig) return;
-    trackerSig = sig;
-    trackerList.replaceChildren();
+  const rowNode = (docRef, cost, name, right, extraCls) => {
+    const r = el(docRef, 'div', `hs-tr-row${extraCls ? ` ${extraCls}` : ''}`);
+    if (cost !== null) r.append(el(docRef, 'span', 'hs-tr-cost', String(cost)));
+    r.append(el(docRef, 'span', 'hs-tr-name', name));
+    if (right) r.append(el(docRef, 'span', 'hs-tr-right', right));
+    return r;
+  };
 
-    const rowNode = (cost, name, right, extraCls) => {
-      const r = el(doc, 'div', `hs-tr-row${extraCls ? ` ${extraCls}` : ''}`);
-      if (cost !== null) r.append(el(doc, 'span', 'hs-tr-cost', String(cost)));
-      r.append(el(doc, 'span', 'hs-tr-name', name));
-      if (right) r.append(el(doc, 'span', 'hs-tr-right', right));
-      return r;
-    };
+  const renderMyTrackerBody = (tr, force = false) => {
+    const sig = `${activeMyTab}|${tr.deckSource}|${tr.deckMismatch}|${JSON.stringify(tr.myRemaining)}|${JSON.stringify(tr.myPlayed)}`;
+    if (!force && sig === myTrackerSig) return;
+    myTrackerSig = sig;
+    myTrackerList.replaceChildren();
 
-    if (activeTab === 'my') {
-      if (tr.deckSource === 'none') {
-        trackerList.append(el(doc, 'div', 'hs-tr-hint', tr.deckMismatch ? t.mismatchHint : t.noDeckHint));
-        for (const p of tr.myPlayed || []) {
-          trackerList.append(rowNode(p.cost, p.name, `${t.deckPlayed}×${p.count}`));
-        }
+    if (activeMyTab === 'played') {
+      if (!tr.myPlayed || !tr.myPlayed.length) {
+        myTrackerList.append(el(doc, 'div', 'hs-tr-hint', t.noMyPlaysYet));
         return;
       }
-      if (!tr.myRemaining || !tr.myRemaining.length) {
-        trackerList.append(el(doc, 'div', 'hs-tr-hint', t.deckEmpty));
-        return;
-      }
-      for (const c of tr.myRemaining) {
-        const probText = c.prob > 0 ? ` ${Math.round(c.prob * 100)}%` : '';
-        const right = `×${c.left}${probText}`;
-        const label = c.extraCreated ? `${c.name} [洗]` : c.name;
-        trackerList.append(rowNode(c.cost, label, right));
+      for (const p of tr.myPlayed) {
+        myTrackerList.append(rowNode(doc, p.cost, p.name, `${t.deckPlayed}×${p.count}`));
       }
       return;
     }
 
-    if (activeTab === 'opp') {
+    if (tr.deckSource === 'none') {
+      myTrackerList.append(el(doc, 'div', 'hs-tr-hint', tr.deckMismatch ? t.mismatchHint : t.noDeckHint));
+      for (const p of tr.myPlayed || []) {
+        myTrackerList.append(rowNode(doc, p.cost, p.name, `${t.deckPlayed}×${p.count}`));
+      }
+      return;
+    }
+    if (!tr.myRemaining || !tr.myRemaining.length) {
+      myTrackerList.append(el(doc, 'div', 'hs-tr-hint', t.deckEmpty));
+      return;
+    }
+    for (const c of tr.myRemaining) {
+      const probText = c.prob > 0 ? ` ${Math.round(c.prob * 100)}%` : '';
+      const right = `×${c.left}${probText}`;
+      const label = c.extraCreated ? `${c.name} [洗]` : c.name;
+      myTrackerList.append(rowNode(doc, c.cost, label, right));
+    }
+  };
+
+  const renderOppTrackerBody = (tr, force = false) => {
+    const sig = `${activeOppTab}|${tr.oppDeckSource}|${tr.oppDeckMismatch}|${tr.oppSecrets}|${JSON.stringify(tr.oppRemaining)}|${JSON.stringify(tr.oppPlayed)}|${JSON.stringify(tr.oppHand)}`;
+    if (!force && sig === oppTrackerSig) return;
+    oppTrackerSig = sig;
+    oppTrackerList.replaceChildren();
+
+    if (activeOppTab === 'deck') {
+      if (tr.oppDeckSource !== 'imported') {
+        oppTrackerList.append(el(doc, 'div', 'hs-tr-hint', tr.oppDeckMismatch ? t.mismatchHint : t.noOppDeckHint));
+        return;
+      }
+      if (!tr.oppRemaining || !tr.oppRemaining.length) {
+        oppTrackerList.append(el(doc, 'div', 'hs-tr-hint', t.deckEmpty));
+        return;
+      }
+      for (const c of tr.oppRemaining) {
+        const probText = c.prob > 0 ? ` ${Math.round(c.prob * 100)}%` : '';
+        oppTrackerList.append(rowNode(doc, c.cost, c.name, `×${c.left}${probText}`));
+      }
+      return;
+    }
+
+    if (activeOppTab === 'opp') {
       if (!tr.oppPlayed || !tr.oppPlayed.length) {
-        trackerList.append(el(doc, 'div', 'hs-tr-hint', t.noPlaysYet));
+        oppTrackerList.append(el(doc, 'div', 'hs-tr-hint', t.noPlaysYet));
         return;
       }
       for (const p of tr.oppPlayed) {
         const right = `${p.count > 1 ? `×${p.count} ` : ''}${p.created ? t.oppCreated : ''}`.trim();
-        trackerList.append(rowNode(p.cost, p.name, right, p.created ? 'is-created' : ''));
+        oppTrackerList.append(rowNode(doc, p.cost, p.name, right, p.created ? 'is-created' : ''));
       }
       return;
     }
 
-    // hand tab
     if (tr.oppSecrets > 0) {
-      trackerList.append(el(doc, 'div', 'hs-tr-secret', t.secretsCount(tr.oppSecrets)));
+      oppTrackerList.append(el(doc, 'div', 'hs-tr-secret', t.secretsCount(tr.oppSecrets)));
     }
     if (!tr.oppHand || !tr.oppHand.length) {
-      trackerList.append(el(doc, 'div', 'hs-tr-hint', t.noOppHand));
+      oppTrackerList.append(el(doc, 'div', 'hs-tr-hint', t.noOppHand));
       return;
     }
     for (const h of tr.oppHand) {
@@ -790,25 +917,71 @@ function mount(ctx) {
         : h.isCoin
           ? `#${h.slot} ${t.oppCoin}`
           : `#${h.slot} T${h.enteredTurn} ${h.created ? (h.creatorName ? `${t.oppCreated}(${h.creatorName})` : t.oppCreated) : t.oppDraw}`;
-      trackerList.append(rowNode(null, label, t.heldTurns(h.age), h.created ? 'is-created' : ''));
+      oppTrackerList.append(rowNode(doc, null, label, t.heldTurns(h.age), h.created ? 'is-created' : ''));
     }
+  };
+
+  const renderDeckBarNodes = (bar, rawList, selectMethod, deleteMethod, prevSig) => {
+    const list = Array.isArray(rawList) ? rawList : [];
+    const sig = JSON.stringify(list);
+    if (sig === prevSig) return prevSig;
+    bar.replaceChildren();
+    if (!list.length) { bar.hidden = true; return sig; }
+    bar.hidden = false;
+    for (const d of list) {
+      const chipWrap = el(doc, 'div', `hs-deck-chip${d.active ? ' is-on' : ''}`);
+      const pickBtn = el(doc, 'button', 'hs-deck-chip-btn', d.heroClass ? `${d.heroClass}·${d.name}` : d.name);
+      pickBtn.type = 'button';
+      pickBtn.title = d.name;
+      pickBtn.addEventListener('click', async () => {
+        try {
+          apply(await ctx.invoke(selectMethod, [d.active ? '' : d.id]));
+        } catch (err) {
+          showError(err);
+        }
+      }, { signal: ctx.signal });
+      const delBtn = el(doc, 'button', 'hs-deck-chip-del', '×');
+      delBtn.type = 'button';
+      delBtn.title = t.deleteDeckTitle;
+      delBtn.addEventListener('click', async () => {
+        try {
+          apply(await ctx.invoke(deleteMethod, [d.id]));
+        } catch (err) {
+          showError(err);
+        }
+      }, { signal: ctx.signal });
+      chipWrap.append(pickBtn, delBtn);
+      bar.append(chipWrap);
+    }
+    return sig;
   };
 
   const renderTracker = (status) => {
     const tr = status.tracker;
     latestTracker = tr || null;
-    if (!tr) { trackerBox.hidden = true; return; }
-    trackerBox.hidden = false;
+    if (!tr) { trackersGrid.hidden = true; return; }
+    trackersGrid.hidden = false;
 
-    const badges = [];
-    if (tr.deckName) badges.push(tr.deckName);
-    if (tr.inGame) badges.push(`${tr.myRemainingCount}`);
-    if (tr.remainingBurstDamage > 0) badges.push(t.burstBadge(tr.remainingBurstDamage));
-    if (tr.hasDuplicates === false) badges.push(t.highlanderReady);
-    trackerTitle.textContent = badges.length ? `${t.trackerTitle} · ${badges.join(' · ')}` : t.trackerTitle;
+    const myBadges = [];
+    if (tr.deckName) myBadges.push(tr.deckName);
+    else if (tr.myClass) myBadges.push(tr.myClass);
+    if (tr.inGame) myBadges.push(`${tr.myRemainingCount}`);
+    if (tr.remainingBurstDamage > 0) myBadges.push(t.burstBadge(tr.remainingBurstDamage));
+    if (tr.hasDuplicates === false) myBadges.push(t.highlanderReady);
+    myTrackerTitle.textContent = myBadges.length ? `${t.myTrackerTitle} · ${myBadges.join(' · ')}` : t.myTrackerTitle;
 
-    // 只要存在已导入的卡组代码（哪怕当前局职业不符导致 deckSource 退回 'none'），就保留「清代码」入口
-    clearDeckBtn.hidden = !(tr.hasImportedDeck ?? (tr.deckSource === 'imported' || tr.deckMismatch));
+    const oppBadges = [];
+    if (tr.oppDeckName) oppBadges.push(tr.oppDeckName);
+    else if (tr.oppClass) oppBadges.push(tr.oppClass);
+    if (tr.inGame) oppBadges.push(`${t.hand}${tr.oppHandCount ?? 0}/${t.deck}${tr.oppDeckCount ?? 0}`);
+    if (tr.oppSecrets > 0) oppBadges.push(t.secretsCount(tr.oppSecrets));
+    oppTrackerTitle.textContent = oppBadges.length ? `${t.oppTrackerTitle} · ${oppBadges.join(' · ')}` : t.oppTrackerTitle;
+
+    myDeckUi.clearBtn.hidden = !(tr.hasImportedDeck ?? (tr.deckSource === 'imported' || tr.deckMismatch));
+    oppDeckUi.clearBtn.hidden = !(tr.hasOppImportedDeck ?? (tr.oppDeckSource === 'imported' || tr.oppDeckMismatch));
+    myDeckBarSig = renderDeckBarNodes(myDeckUi.bar, tr.savedDecks, 'selectDeck', 'deleteDeck', myDeckBarSig);
+    oppDeckBarSig = renderDeckBarNodes(oppDeckUi.bar, tr.oppSavedDecks, 'selectOppDeck', 'deleteOppDeck', oppDeckBarSig);
+
     if (tr.matchupBrief) {
       matchupRow.hidden = false;
       matchupRow.textContent = tr.matchupBrief;
@@ -816,7 +989,8 @@ function mount(ctx) {
       matchupRow.hidden = true;
       matchupRow.textContent = '';
     }
-    renderTrackerBody(tr);
+    renderMyTrackerBody(tr);
+    renderOppTrackerBody(tr);
   };
 
   const apply = (payload) => {

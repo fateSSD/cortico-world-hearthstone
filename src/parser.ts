@@ -302,6 +302,10 @@ export interface MinionView {
   canAttack: boolean;
   /** 随从种族（如 MECHANICAL 机械、BEAST 野兽、DRAGON 龙等）。 */
   race?: string;
+  /** 是否由其他牌衍生/召唤生成（非构筑原始进手/上场）。 */
+  created?: boolean;
+  /** 生成/衍生来源卡名（如有）。 */
+  creatorName?: string;
 }
 
 export interface SideState {
@@ -499,6 +503,10 @@ export interface ActionRecord {
   cost?: number;
   atk?: number;
   health?: number;
+  /** 是否由其他牌衍生/发现/偷取而来。 */
+  created?: boolean;
+  /** 衍生来源卡名（如有）。 */
+  creatorName?: string;
 }
 
 /** 每回合开局时的一个点,复盘靠它还原局势走向。 */
@@ -1372,15 +1380,26 @@ export class PowerLogParser {
     }
   }
 
+  private entityCreatorName(e: EntityState): string | undefined {
+    const cid = num(tag(e, 'DISPLAYED_CREATOR') ?? tag(e, 'CREATOR'), 0);
+    if (cid <= 0) return undefined;
+    const c = this.entities.get(cid);
+    if (!c) return undefined;
+    return c.name || cardName(c.cardId ?? '') || undefined;
+  }
+
   private record(
     kind: ActionKind,
     entityId: number,
     who: number | null,
     text: string,
-    extra?: Pick<ActionRecord, 'cardId' | 'cost' | 'atk' | 'health'>,
+    extra?: Pick<ActionRecord, 'cardId' | 'cost' | 'atk' | 'health' | 'created' | 'creatorName'>,
   ): void {
     const playerId = who ?? this.playerIdOf(entityId);
     const localId = this.localPlayerId();
+    const ent = this.entities.get(entityId);
+    const created = extra?.created ?? (ent ? (this.isEntityCreated(ent) || isCoinCard(ent.cardId)) : false);
+    const creatorName = extra?.creatorName ?? (ent ? this.entityCreatorName(ent) : undefined);
     this.seq += 1;
     this.actions.push({
       seq: this.seq,
@@ -1391,6 +1410,8 @@ export class PowerLogParser {
       // 名字这一瞬间可能还没有（对手出牌常见）。留给 backfill 补，别就此定稿。
       entityId,
       ...extra,
+      ...(created ? { created: true } : {}),
+      ...(creatorName ? { creatorName } : {}),
     });
     this.trimHistory();
   }
@@ -1405,9 +1426,15 @@ export class PowerLogParser {
    */
   private backfillActionNames(): void {
     for (const a of this.actions) {
-      if (a.entityId === undefined || !a.text.includes('未知的牌')) continue;
+      if (a.entityId === undefined) continue;
       const e = this.entities.get(a.entityId);
       if (!e) continue;
+      if (!a.created && (this.isEntityCreated(e) || isCoinCard(e.cardId))) a.created = true;
+      if (!a.creatorName) {
+        const cn = this.entityCreatorName(e);
+        if (cn) a.creatorName = cn;
+      }
+      if (!a.text.includes('未知的牌')) continue;
       const name = e.name || cardName(e.cardId ?? '');
       if (!name) continue;
       a.text = a.text.replace('未知的牌', name);
@@ -1708,6 +1735,8 @@ export class PowerLogParser {
         const maxHealth = tagNum(e, 'HEALTH', 0);
         const damage = tagNum(e, 'DAMAGE', 0);
         const race = tag(e, 'CARDRACE') || undefined;
+        const created = this.isEntityCreated(e);
+        const creatorName = this.entityCreatorName(e);
         minions.push({
           id: e.id,
           name: e.name,
@@ -1730,6 +1759,8 @@ export class PowerLogParser {
           spellPower: tagNum(e, 'SPELLPOWER', 0),
           canAttack: !tagOn(e, 'EXHAUSTED') && !tagOn(e, 'CANT_ATTACK') && !tagOn(e, 'DORMANT') && tagNum(e, 'ATK', 0) > 0,
           ...(race ? { race } : {}),
+          ...(created ? { created: true } : {}),
+          ...(creatorName ? { creatorName } : {}),
         });
       } else if (cardType === 'WEAPON') {
         weapon = {
@@ -1819,23 +1850,18 @@ export class PowerLogParser {
     const myDeckCount = snap?.me.deckCount ?? 0;
     const foeDeckCount = snap?.opponent.deckCount ?? 0;
 
-    const creatorLabelOf = (e: EntityState): string | undefined => {
-      const cid = num(tag(e, 'DISPLAYED_CREATOR') ?? tag(e, 'CREATOR'), 0);
-      if (cid <= 0) return undefined;
-      const c = this.entities.get(cid);
-      if (!c) return undefined;
-      return c.name || cardName(c.cardId ?? '') || undefined;
+    const toCardEvent = (e: EntityState, turnOverride?: number): TrackerCardEvent => {
+      const creatorName = this.entityCreatorName(e);
+      return {
+        entityId: e.id,
+        cardId: e.cardId,
+        name: e.name || cardName(e.cardId) || e.cardId || '未知的牌',
+        cost: tagNum(e, 'COST', 0),
+        turn: turnOverride ?? e.playedTurn ?? e.enteredTurn ?? this.turn,
+        isCreated: this.isEntityCreated(e) || isCoinCard(e.cardId),
+        ...(creatorName ? { creatorName } : {}),
+      };
     };
-
-    const toCardEvent = (e: EntityState, turnOverride?: number): TrackerCardEvent => ({
-      entityId: e.id,
-      cardId: e.cardId,
-      name: e.name || cardName(e.cardId) || e.cardId || '未知的牌',
-      cost: tagNum(e, 'COST', 0),
-      turn: turnOverride ?? e.playedTurn ?? e.enteredTurn ?? this.turn,
-      isCreated: this.isEntityCreated(e) || isCoinCard(e.cardId),
-      ...(creatorLabelOf(e) ? { creatorName: creatorLabelOf(e) } : {}),
-    });
 
     const drawnFromDeck: TrackerCardEvent[] = [];
     const myPlayed: TrackerCardEvent[] = [];
@@ -1890,7 +1916,7 @@ export class PowerLogParser {
       if (zone === 'HAND') {
         const enteredTurn = e.enteredTurn ?? 0;
         const pos = tagNum(e, 'ZONE_POSITION', e.id);
-        const creatorName = creatorLabelOf(e);
+        const creatorName = this.entityCreatorName(e);
         const likelyCoin = isCoinCard(e.cardId)
           || (!isCreated && !e.wasInDeck && e.initialZone === 'HAND' && enteredTurn === 0
             && this.firstPlayerId !== null && this.firstPlayerId > 0 && foeId !== this.firstPlayerId);

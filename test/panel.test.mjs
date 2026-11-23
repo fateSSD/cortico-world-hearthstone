@@ -179,6 +179,65 @@ test('面板 progress 与 tracker 新字段可选透传且 world panelInvoke 支
     assert.equal(clr.ok, true);
     assert.equal(clr.status.tracker.deckSource, 'none');
     assert.equal(clr.status.tracker.hasImportedDeck, false);
+
+    // 多卡组保存、切换（selectDeck）与删除（deleteDeck）
+    const code2 = encodeDeckString({
+      format: 2,
+      heroes: [671], // 圣骑士
+      cards: [{ dbfId: 1004, count: 1 }],
+    });
+    await invoke('importDeck', [`### 套牌A\n${code}`]);
+    const impB = await invoke('importDeck', [`### 套牌B\n${code2}`]);
+    assert.equal(impB.status.tracker.savedDecks.length, 2);
+    assert.equal(impB.status.tracker.deckName, '套牌B');
+
+    const deckA = impB.status.tracker.savedDecks.find((d) => d.name === '套牌A');
+    const deckB = impB.status.tracker.savedDecks.find((d) => d.name === '套牌B');
+    assert.ok(deckA && deckB);
+
+    const sw = await invoke('selectDeck', [deckA.id]);
+    assert.equal(sw.ok, true);
+    assert.equal(sw.status.tracker.activeDeckId, deckA.id);
+    assert.equal(sw.status.tracker.deckMismatch, true, '圣骑士局切到法师套牌A应标职业不符');
+
+    const del = await invoke('deleteDeck', [deckA.id]);
+    assert.equal(del.ok, true);
+    assert.equal(del.status.tracker.savedDecks.length, 1);
+    assert.equal(del.status.tracker.deckName, '套牌B');
+
+    // 对手记牌器独立导入、多卡组切换、删除与清代码
+    const oppImp1 = await invoke('importOppDeck', [`### 对手法1\n${code}`]);
+    assert.equal(oppImp1.ok, true);
+    assert.equal(oppImp1.status.tracker.oppDeckName, '对手法1');
+    assert.equal(oppImp1.status.tracker.hasOppImportedDeck, true);
+    assert.equal(oppImp1.status.tracker.oppRemaining.length, 2);
+
+    const oppImp2 = await invoke('importOppDeck', [`### 对手骑2\n${code2}`]);
+    assert.equal(oppImp2.status.tracker.oppSavedDecks.length, 2);
+    assert.equal(oppImp2.status.tracker.oppDeckName, '对手骑2');
+
+    const opp1 = oppImp2.status.tracker.oppSavedDecks.find((d) => d.name === '对手法1');
+    assert.ok(opp1);
+    const oppSw = await invoke('selectOppDeck', [opp1.id]);
+    assert.equal(oppSw.ok, true);
+    assert.equal(oppSw.status.tracker.oppDeckName, '对手法1');
+
+    const oppClr = await invoke('clearOppDeck', []);
+    assert.equal(oppClr.ok, true);
+    assert.equal(oppClr.status.tracker.oppDeckSource, 'none');
+    assert.equal(oppClr.status.tracker.hasOppImportedDeck, false);
+    assert.equal(oppClr.status.tracker.oppSavedDecks.length, 1);
+
+    // 搜对手卡组：无对手职业时返回友好提示，不会抛异常
+    const sNoOpp = await invoke('searchOppDeck', []);
+    assert.equal(sNoOpp.ok, false);
+    assert.match(sNoOpp.error, /对手职业/);
+
+    // 工具 hearthstone_tracker 支持 import_opp_deck
+    const trTool = world.tools().find((t) => t.name === 'hearthstone_tracker');
+    assert.ok(trTool);
+    const trRes = await trTool.handler({ action: 'import_opp_deck', deckCode: code, deckName: 'AI搜到的法' });
+    assert.match(trRes.text, /对手记牌器.*AI搜到的法/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

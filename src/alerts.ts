@@ -8,7 +8,7 @@
  * 否则一回合里血量抖动会把同一件事反复推过去。
  */
 import type { ActionRecord, GameSnapshot, SideState, TurnPoint } from './parser.ts';
-import { cardBody, cardClassZh, cardName, isLegendary } from './effects.ts';
+import { cardBody, cardClassesZh, cardMatchesHeroClass, cardName, isLegendary } from './effects.ts';
 import { planLethal, worstCaseFaceAttack } from './lethal.ts';
 
 export interface AlertContext {
@@ -288,12 +288,56 @@ export function detectAlerts(ctx: AlertContext): Alert[] {
  *
  * 这里只报事实和理由,不判断「该不该惊讶」—— 那是她的活。
  */
+/** 胜地历险记「游客」牌允许把对应副职业牌带进构筑，对手露出游客后该副职业不再算跨职业意外。 */
+const TOURIST_SUBCLASS: Record<string, string> = {
+  VAC_336: '术士',
+  VAC_340: '德鲁伊',
+  VAC_413: '战士',
+  VAC_424: '圣骑士',
+  VAC_437: '萨满',
+  VAC_450: '恶魔猎手',
+  VAC_501: '牧师',
+  VAC_503: '死亡骑士',
+  VAC_507: '潜行者',
+  VAC_519: '法师',
+  VAC_957: '猎人',
+  WORK_013: '猎人',
+  WORK_063: '潜行者',
+};
+
+function opponentTouristSubclasses(
+  actions: readonly ActionRecord[],
+  before: GameSnapshot | null,
+  now: GameSnapshot,
+): Set<string> {
+  const subs = new Set<string>();
+  for (const a of actions) {
+    if (a.who === 'opponent' && a.cardId && TOURIST_SUBCLASS[a.cardId]) subs.add(TOURIST_SUBCLASS[a.cardId]);
+  }
+  for (const m of now.opponent.minions) {
+    if (m.cardId && TOURIST_SUBCLASS[m.cardId]) subs.add(TOURIST_SUBCLASS[m.cardId]);
+  }
+  for (const m of before?.opponent.minions ?? []) {
+    if (m.cardId && TOURIST_SUBCLASS[m.cardId]) subs.add(TOURIST_SUBCLASS[m.cardId]);
+  }
+  return subs;
+}
+
+function offClassLabel(cardId: string, foeHeroClass: string, allowedSubclasses: Set<string>): string {
+  if (!cardId || !foeHeroClass) return '';
+  if (cardMatchesHeroClass(cardId, foeHeroClass)) return '';
+  const classes = cardClassesZh(cardId);
+  if (classes.some((c) => allowedSubclasses.has(c))) return '';
+  return classes.join('/');
+}
+
 export function surpriseAlerts(
   actions: readonly ActionRecord[],
   before: GameSnapshot | null,
   now: GameSnapshot,
 ): Alert[] {
   const foe = now.opponent;
+  const allowedSubclasses = opponentTouristSubclasses(actions, before, now);
   const cands: { key: string; name: string; why: string[] }[] = [];
   const seen = new Set<string>();
   const add = (key: string, name: string, why: string[]) => {
@@ -314,8 +358,8 @@ export function surpriseAlerts(
     if (a.kind !== 'play' && a.kind !== 'weapon') continue;
 
     const reasons: string[] = [];
-    const cls = cardClassZh(a.cardId ?? '');
-    if (cls && cls !== '中立' && foe.heroClass && cls !== foe.heroClass) {
+    const cls = (a.created || a.creatorName) ? '' : offClassLabel(a.cardId ?? '', foe.heroClass, allowedSubclasses);
+    if (cls) {
       reasons.push(`这是${cls}的牌,他玩的是${foe.heroClass},只可能是发现或者偷来的`);
     }
     if (typeof a.cost === 'number' && foe.manaMax > 0 && a.cost > foe.manaMax) {
@@ -341,8 +385,8 @@ export function surpriseAlerts(
   for (const m of foe.minions) {
     if (beforeIds.has(m.id)) continue;
     const reasons: string[] = [];
-    const cls = cardClassZh(m.cardId ?? '');
-    if (cls && cls !== '中立' && foe.heroClass && cls !== foe.heroClass) {
+    const cls = (m.created || m.creatorName) ? '' : offClassLabel(m.cardId ?? '', foe.heroClass, allowedSubclasses);
+    if (cls) {
       reasons.push(`这是${cls}的牌,他玩的是${foe.heroClass}`);
     }
     if (m.atk + m.health >= 16) reasons.push(`一只 ${m.atk}/${m.health}`);

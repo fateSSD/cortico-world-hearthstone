@@ -219,9 +219,14 @@ test('跨职业牌:他的职业打不出这张,只可能是发现或偷来的', 
   ));
   const hit = out.find((a) => a.id.startsWith('surprise:'));
   assert.ok(hit, '没认出来');
-  assert.match(hit.text, /德鲁伊的牌/);
+  assert.match(hit.text, /德鲁伊\/术士的牌/);
   assert.match(hit.text, /法师/);
   assert.equal(faceOf(hit), 'surprised', '这种时刻该是惊讶的脸');
+  // 但术士打出 DEEP_027（德/术双职业）不应误报跨职业
+  const warlockOut = surpriseAlerts([actA({ cardId: 'DEEP_027', cost: 4, atk: 6, health: 8 })], null, snap(
+    side(), side({ isLocal: false, heroClass: '术士', manaMax: 8 }),
+  ));
+  assert.deepEqual(warlockOut, []);
 });
 
 test('比他这回合水晶还贵的牌:靠减费或硬币硬打出来的', () => {
@@ -286,6 +291,44 @@ test('变形体只算一次 —— 同一张牌的 `t` 版本不该惊第二下'
   ] }));
   const out = surpriseAlerts([], before, now);
   assert.equal(out.length, 1, `变形体和本体被算成两件事:${out.map((a) => a.text).join(' / ')}`);
+});
+
+test('双职业/多职业牌归属任一对应职业，不误报跨职业惊讶', () => {
+  // CFM_621 卡扎库斯归属 法师/牧师/术士，术士打出时不该惊呼「法师/牧师/术士的牌」
+  const out1 = surpriseAlerts([actA({ cardId: 'CFM_621', cost: 4 })], null, snap(
+    side(), side({ isLocal: false, heroClass: '术士', manaMax: 4 }),
+  ));
+  assert.deepEqual(out1, []);
+
+  // 场上出现多职业随从同理
+  const before = snap(side(), side({ isLocal: false, heroClass: '牧师', manaMax: 6, minions: [] }));
+  const now = snap(side(), side({ isLocal: false, heroClass: '牧师', manaMax: 6, minions: [
+    minion({ id: 1, atk: 3, health: 3, cardId: 'CFM_621' }),
+  ] }));
+  assert.deepEqual(surpriseAlerts([], before, now), []);
+});
+
+test('对手通过衍生/特殊卡牌或游客带出其他职业牌时，不触发跨职业迷茫', () => {
+  // 1) 明确标注由特殊卡牌衍生的跨职业牌（如太阳之井/发现/偷牌）不再报跨职业惊讶
+  const createdAction = actA({ cardId: 'TTN_075', cost: 6, created: true, creatorName: '太阳之井' });
+  const outCreated = surpriseAlerts([createdAction], null, snap(
+    side(), side({ isLocal: false, heroClass: '潜行者', manaMax: 6 }),
+  ));
+  assert.deepEqual(outCreated, []);
+
+  // 2) 场上衍生出的跨职业随从同样不报跨职业惊讶
+  const before = snap(side(), side({ isLocal: false, heroClass: '潜行者', manaMax: 8, minions: [] }));
+  const now = snap(side(), side({ isLocal: false, heroClass: '潜行者', manaMax: 8, minions: [
+    minion({ id: 9, atk: 3, health: 4, cardId: 'DEEP_027', created: true, creatorName: '随机召唤' }),
+  ] }));
+  assert.deepEqual(surpriseAlerts([], before, now), []);
+
+  // 3) 对手场上有死亡骑士游客（VAC_503）时，打出死亡骑士牌也不算跨职业意外
+  const touristNow = snap(side(), side({ isLocal: false, heroClass: '术士', manaMax: 8, minions: [
+    minion({ id: 10, atk: 4, health: 4, cardId: 'VAC_503' }),
+  ] }));
+  const outTourist = surpriseAlerts([actA({ cardId: 'RLK_061', cost: 3 })], null, touristNow);
+  assert.deepEqual(outTourist, []);
 });
 
 /* ---------- 2026-10-24:疲劳的两个来源不是一回事 ---------- */

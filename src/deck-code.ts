@@ -7,7 +7,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { cardClassZh, cardCostOf, cardName, cardNote } from './effects.ts';
+import { cardClassesZh, cardClassZh, cardCostOf, cardName, cardNote } from './effects.ts';
 
 export interface DecodedDeckCard {
   dbfId: number;
@@ -109,8 +109,8 @@ function resolveHeroClass(heroCardId: string, classHint: string, cards: DecodedD
   }
   if (classHint) return classHint;
   for (const c of cards) {
-    const cls = cardClassZh(c.cardId);
-    if (cls && cls !== '中立') return cls;
+    const classes = cardClassesZh(c.cardId).filter((cls) => cls !== '中立');
+    if (classes.length === 1) return classes[0];
   }
   return '';
 }
@@ -249,4 +249,8 @@ export function encodeDeckString(opts: {
     pushVarint(c.count);
   }
   return Buffer.from(bytes).toString('base64');
+}
+
+export function dbfIdToCardId(dbfId: number): string {
+  return loadDbfMap()[String(dbfId)] ?? '';
 }

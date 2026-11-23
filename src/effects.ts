@@ -266,7 +266,7 @@ export function cardCostOf(cardId: string): number | null {
 }
 
 /**
- * 这张牌的职业(中文,如「法师」「中立」)。查不到返回空串。
+ * 这张牌的职业(中文,如「法师」「中立」;多职业以 `/` 分隔,如「法师/术士」)。查不到返回空串。
  *
  * 用途只有一个:**判断对手打出的牌是不是跨职业**。跨职业牌只可能是发现/偷来的,
  * 这是「出乎意料」里最硬的一条判据 —— 它不依赖任何推测。
@@ -274,6 +274,21 @@ export function cardCostOf(cardId: string): number | null {
 export function cardClassZh(cardId: string): string {
   if (!cardId) return '';
   return lookupEntry(cardId)?.[5] ?? '';
+}
+
+/** 拆分卡表职业字段为数组（单职业返回 1 个元素，双/多职业返回多个）。 */
+export function cardClassesZh(cardId: string): string[] {
+  const raw = cardClassZh(cardId);
+  if (!raw) return [];
+  return raw.split('/').map((s) => s.trim()).filter(Boolean);
+}
+
+/** 判断某张牌是否归属指定英雄职业（含中立、双/多职业包含该职业或无职业信息）。 */
+export function cardMatchesHeroClass(cardId: string, heroClass: string): boolean {
+  if (!heroClass) return true;
+  const classes = cardClassesZh(cardId);
+  if (classes.length === 0) return true;
+  return classes.includes('中立') || classes.includes(heroClass);
 }
 
 /**

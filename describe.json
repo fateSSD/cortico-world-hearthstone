@@ -41,7 +41,7 @@
     },
     {
       "name": "hearthstone_tracker",
-      "description": "Deck tracker and ranked/arena progress tool. Call with action=\"status\" (default) during a game to inspect exact remaining cards and draw probabilities in your deck (when a deck code is imported or arena draft was recorded), whether no duplicates remain for Reno/highlander triggers, cards the opponent has played (initial vs. created), opponent hand card ages/created sources, secrets, and current ranked/arena win-loss record. Also supports importing a Blizzard deck code (action=\"import_deck\"), clearing it (\"clear_deck\"), calibrating ranked tier (\"set_rank\", e.g. \"钻5 2星\" or \"传说 #1200\"), or calibrating/resetting arena wins and losses (\"set_arena\" / \"reset_arena\").",
+      "description": "Deck tracker and ranked/arena progress tool. Call with action=\"status\" (default) during a game to inspect exact remaining cards and draw probabilities in your deck (when a deck code is imported or arena draft was recorded), whether no duplicates remain for Reno/highlander triggers, cards the opponent has played (initial vs. created), opponent hand card ages/created sources, secrets, and current ranked/arena win-loss record. Also supports importing a Blizzard deck code (action=\"import_deck\" / \"import_opp_deck\"), clearing it (\"clear_deck\" / \"clear_opp_deck\"), calibrating ranked tier (\"set_rank\", e.g. \"钻5 2星\" or \"传说 #1200\"), or calibrating/resetting arena wins and losses (\"set_arena\" / \"reset_arena\").",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -52,6 +52,8 @@
               "status",
               "import_deck",
               "clear_deck",
+              "import_opp_deck",
+              "clear_opp_deck",
               "set_rank",
               "set_arena",
               "reset_arena"

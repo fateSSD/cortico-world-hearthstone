@@ -371,8 +371,20 @@ const CLASS_ZH = {
  *     这是最硬的「出乎意料」信号,而且客观,不需要猜。
  *   · 第 7 位 = 传说标记 `L`(只对传说牌写,省体积)。
  */
+function cardClassesString(card) {
+  const list = Array.isArray(card.classes) && card.classes.length > 0
+    ? card.classes
+    : (card.cardClass ? [card.cardClass] : []);
+  const seen = [];
+  for (const c of list) {
+    const zh = CLASS_ZH[c];
+    if (zh && !seen.includes(zh)) seen.push(zh);
+  }
+  return seen.join('/');
+}
+
 function row(parts, card) {
-  const cls = CLASS_ZH[card.cardClass] ?? '';
+  const cls = cardClassesString(card);
   const out = [...parts, cls];
   if (card.rarity === 'LEGENDARY') out.push('L');
   return out;

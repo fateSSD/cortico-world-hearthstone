@@ -41,6 +41,7 @@ import {
   type ArenaMode, type LadderFormat,
 } from './progress.ts';
 import { decodeDeckString, type DecodedDeck } from './deck-code.ts';
+import { searchOpponentDeckCode } from './deck-search.ts';
 import { ArchetypeStore, renderMatchupSummary, type ArchetypeEntry, type ArchetypeMatch } from './archetypes.ts';
 import { buildTrackerSnapshot, renderTrackerForModel, renderTrackerForPrompt, type TrackerSnapshot } from './tracker.ts';
 import {
@@ -557,7 +558,7 @@ const TRACKER_DECL: Decl = {
     + 'exact remaining cards and draw probabilities in your deck (when a deck code is imported or arena draft was recorded), '
     + 'whether no duplicates remain for Reno/highlander triggers, cards the opponent has played (initial vs. created), '
     + 'opponent hand card ages/created sources, secrets, and current ranked/arena win-loss record. '
-    + 'Also supports importing a Blizzard deck code (action="import_deck"), clearing it ("clear_deck"), '
+    + 'Also supports importing a Blizzard deck code (action="import_deck" / "import_opp_deck"), clearing it ("clear_deck" / "clear_opp_deck"), '
     + 'calibrating ranked tier ("set_rank", e.g. "钻5 2星" or "传说 #1200"), or calibrating/resetting arena wins and losses ("set_arena" / "reset_arena").',
   parameters: {
     type: 'object',
@@ -565,7 +566,7 @@ const TRACKER_DECL: Decl = {
     properties: {
       action: {
         type: 'string',
-        enum: ['status', 'import_deck', 'clear_deck', 'set_rank', 'set_arena', 'reset_arena'],
+        enum: ['status', 'import_deck', 'clear_deck', 'import_opp_deck', 'clear_opp_deck', 'set_rank', 'set_arena', 'reset_arena'],
         description: 'Operation to perform. Defaults to status.',
       },
       deckCode: { type: 'string', description: 'For import_deck: Blizzard deckstring or full in-game copied deck text.' },
@@ -782,7 +783,15 @@ export class HearthstoneWorld implements World {
   private readonly progress: ProgressStore;
   private readonly archetypes: ArchetypeStore;
   private readonly deckPath: string;
-  private importedDeck: { code: string; name: string; deck: DecodedDeck; savedAt: string } | null = null;
+  private readonly oppDeckPath: string;
+  private myDecks: { activeId: string | null; decks: { id: string; code: string; name: string; heroClass: string; deck: DecodedDeck; savedAt: string }[] } = { activeId: null, decks: [] };
+  private oppDecks: { activeId: string | null; decks: { id: string; code: string; name: string; heroClass: string; deck: DecodedDeck; savedAt: string }[] } = { activeId: null, decks: [] };
+  private get importedDeck() {
+    return this.myDecks.activeId ? (this.myDecks.decks.find((d) => d.id === this.myDecks.activeId) ?? null) : null;
+  }
+  private get oppImportedDeck() {
+    return this.oppDecks.activeId ? (this.oppDecks.decks.find((d) => d.id === this.oppDecks.activeId) ?? null) : null;
+  }
   private readonly opts: HearthstoneWorldOptions;
 
   constructor(opts: HearthstoneWorldOptions) {
@@ -796,6 +805,7 @@ export class HearthstoneWorld implements World {
     this.metaPath = join(opts.dataDir, 'hearthstone-arena-meta.json');
     this.planPath = join(opts.dataDir, 'hearthstone-arena-plan.json');
     this.deckPath = join(opts.dataDir, 'hearthstone-deck.json');
+    this.oppDeckPath = join(opts.dataDir, 'hearthstone-opp-deck.json');
     this.progress = new ProgressStore(opts.dataDir);
     this.archetypes = new ArchetypeStore(opts.dataDir);
     this.llmKey = pickKey(opts.secret, [
@@ -807,7 +817,8 @@ export class HearthstoneWorld implements World {
     this.loadArenaMeta();
     this.loadArenaPlan();
     this.loadCelebrated();
-    this.loadImportedDeck();
+    this.myDecks = this.loadDeckBook(this.deckPath);
+    this.oppDecks = this.loadDeckBook(this.oppDeckPath);
   }
 
   /* ---------- 生命周期 ---------- */
@@ -1944,55 +1955,138 @@ export class HearthstoneWorld implements World {
 
   /* ---------- 导入套牌 / 记牌器 / 进度 / 对手卡组情报 ---------- */
 
-  private loadImportedDeck(): void {
+  private loadDeckBook(path: string): { activeId: string | null; decks: { id: string; code: string; name: string; heroClass: string; deck: DecodedDeck; savedAt: string }[] } {
     try {
-      if (!existsSync(this.deckPath)) { this.importedDeck = null; return; }
-      const raw = JSON.parse(readFileSync(this.deckPath, 'utf8')) as { code?: string; name?: string; savedAt?: string };
-      if (!raw?.code) { this.importedDeck = null; return; }
-      const res = decodeDeckString(raw.code);
-      if (!res.ok) { this.importedDeck = null; return; }
-      this.importedDeck = {
-        code: res.deck.code,
-        name: raw.name?.trim() || res.deck.name,
-        deck: { ...res.deck, name: raw.name?.trim() || res.deck.name },
-        savedAt: typeof raw.savedAt === 'string' ? raw.savedAt : '',
+      if (!existsSync(path)) return { activeId: null, decks: [] };
+      const raw = JSON.parse(readFileSync(path, 'utf8')) as {
+        activeId?: string | null;
+        decks?: { id?: string; code?: string; name?: string; savedAt?: string }[];
+        code?: string;
+        name?: string;
+        savedAt?: string;
       };
+      const items = Array.isArray(raw?.decks)
+        ? raw.decks
+        : (raw?.code ? [{ id: 'deck-1', code: raw.code, name: raw.name, savedAt: raw.savedAt }] : []);
+      const decks: { id: string; code: string; name: string; heroClass: string; deck: DecodedDeck; savedAt: string }[] = [];
+      for (let i = 0; i < items.length; i += 1) {
+        const it = items[i];
+        if (!it?.code) continue;
+        const res = decodeDeckString(it.code);
+        if (!res.ok) continue;
+        const name = it.name?.trim() || res.deck.name;
+        const id = it.id?.trim() || `deck-${i + 1}`;
+        decks.push({
+          id,
+          code: res.deck.code,
+          name,
+          heroClass: res.deck.heroClass,
+          deck: { ...res.deck, name },
+          savedAt: typeof it.savedAt === 'string' ? it.savedAt : '',
+        });
+      }
+      const activeId = Array.isArray(raw?.decks)
+        ? (raw.activeId && decks.some((d) => d.id === raw.activeId) ? raw.activeId : null)
+        : (decks[0]?.id ?? null);
+      return { activeId, decks };
     } catch {
-      this.importedDeck = null;
+      return { activeId: null, decks: [] };
     }
   }
 
-  private saveImportedDeck(): void {
+  private saveDeckBook(path: string, book: typeof this.myDecks): void {
     try {
-      if (!this.importedDeck) {
-        if (existsSync(this.deckPath)) unlinkSync(this.deckPath);
+      if (book.decks.length === 0) {
+        if (existsSync(path)) unlinkSync(path);
         return;
       }
-      writeAtomicSync(this.deckPath, JSON.stringify({
-        code: this.importedDeck.code,
-        name: this.importedDeck.name,
-        savedAt: this.importedDeck.savedAt,
+      writeAtomicSync(path, JSON.stringify({
+        activeId: book.activeId,
+        decks: book.decks.map(({ id, code, name, savedAt }) => ({ id, code, name, savedAt })),
       }, null, 2));
     } catch (error) {
       this.log?.warn(`导入卡组没能存下来:${(error as Error).message}`);
     }
   }
 
-  private applyImportDeck(rawText: string, customName = ''): { ok: true; deck: DecodedDeck } | { ok: false; error: string } {
+  private importIntoBook(
+    book: typeof this.myDecks,
+    path: string,
+    rawText: string,
+    customName = '',
+  ): { ok: true; deck: DecodedDeck } | { ok: false; error: string } {
     const res = decodeDeckString(rawText);
     if (!res.ok) return res;
     const finalName = customName.trim() || res.deck.name || `${res.deck.heroClass}套牌`;
     const deck: DecodedDeck = { ...res.deck, name: finalName };
-    this.importedDeck = { code: deck.code, name: finalName, deck, savedAt: nowIso() };
-    this.saveImportedDeck();
+    const existingIdx = book.decks.findIndex((d) => d.code === deck.code);
+    const savedAt = nowIso();
+    if (existingIdx >= 0) {
+      const prev = book.decks[existingIdx];
+      book.decks.splice(existingIdx, 1);
+      const nextName = customName.trim() ? finalName : prev.name;
+      book.decks.unshift({
+        id: prev.id,
+        code: deck.code,
+        name: nextName,
+        heroClass: deck.heroClass,
+        deck: { ...deck, name: nextName },
+        savedAt,
+      });
+      book.activeId = prev.id;
+    } else {
+      const id = `deck-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      book.decks.unshift({ id, code: deck.code, name: finalName, heroClass: deck.heroClass, deck, savedAt });
+      if (book.decks.length > 20) book.decks.length = 20;
+      book.activeId = id;
+    }
+    this.saveDeckBook(path, book);
     return { ok: true, deck };
   }
 
-  private clearImportedDeck(): boolean {
-    const had = this.importedDeck !== null || existsSync(this.deckPath);
-    this.importedDeck = null;
-    this.saveImportedDeck();
+  private selectInBook(book: typeof this.myDecks, path: string, id: string): boolean {
+    if (!id) {
+      book.activeId = null;
+      this.saveDeckBook(path, book);
+      return true;
+    }
+    const found = book.decks.find((d) => d.id === id);
+    if (!found) return false;
+    book.activeId = found.id;
+    this.saveDeckBook(path, book);
+    return true;
+  }
+
+  private deleteInBook(book: typeof this.myDecks, path: string, id: string): boolean {
+    const idx = book.decks.findIndex((d) => d.id === id);
+    if (idx < 0) return false;
+    book.decks.splice(idx, 1);
+    if (book.activeId === id) {
+      book.activeId = book.decks[0]?.id ?? null;
+    }
+    this.saveDeckBook(path, book);
+    return true;
+  }
+
+  private clearActiveInBook(book: typeof this.myDecks, path: string): boolean {
+    const had = book.decks.length > 0 || existsSync(path);
+    if (book.activeId) {
+      book.decks = book.decks.filter((d) => d.id !== book.activeId);
+      book.activeId = null;
+    } else {
+      book.decks = [];
+      book.activeId = null;
+    }
+    this.saveDeckBook(path, book);
     return had;
+  }
+
+  private applyImportDeck(rawText: string, customName = ''): { ok: true; deck: DecodedDeck } | { ok: false; error: string } {
+    return this.importIntoBook(this.myDecks, this.deckPath, rawText, customName);
+  }
+
+  private clearImportedDeck(): boolean {
+    return this.clearActiveInBook(this.myDecks, this.deckPath);
   }
 
   private currentTracker(snapshot: GameSnapshot | null): TrackerSnapshot | null {
@@ -2002,6 +2096,7 @@ export class HearthstoneWorld implements World {
     const arenaMode = arenaModeFromMeta(snapshot.meta);
     return buildTrackerSnapshot(raw, {
       importedDeck: arenaMode ? null : (this.importedDeck?.deck ?? null),
+      oppImportedDeck: arenaMode ? null : (this.oppImportedDeck?.deck ?? null),
       arenaDeck: arenaMode ? this.arenaDeck : undefined,
     });
   }
@@ -2043,6 +2138,40 @@ export class HearthstoneWorld implements World {
   }
 
   private formatTrackerPanelView(snapshot: GameSnapshot | null): PanelTrackerView {
+    const savedDecks = this.myDecks.decks.map((d) => ({
+      id: d.id,
+      name: d.name,
+      heroClass: d.heroClass,
+      active: d.id === this.myDecks.activeId,
+    }));
+    const oppSavedDecks = this.oppDecks.decks.map((d) => ({
+      id: d.id,
+      name: d.name,
+      heroClass: d.heroClass,
+      active: d.id === this.oppDecks.activeId,
+    }));
+    const oppFallback = this.oppImportedDeck
+      ? {
+        hasOppImportedDeck: true,
+        oppDeckSource: 'imported' as const,
+        oppDeckName: this.oppImportedDeck.deck.name,
+        oppDeckMismatch: false,
+        oppSavedDecks,
+        oppActiveDeckId: this.oppDecks.activeId,
+        oppRemaining: this.oppImportedDeck.deck.cards.map((c) => ({
+          cardId: c.cardId, name: c.name, cost: c.cost, left: c.count, total: c.count, prob: 0,
+        })),
+      }
+      : {
+        hasOppImportedDeck: false,
+        oppDeckSource: 'none' as const,
+        oppDeckName: '',
+        oppDeckMismatch: false,
+        oppSavedDecks,
+        oppActiveDeckId: this.oppDecks.activeId,
+        oppRemaining: [],
+      };
+
     const t = this.currentTracker(snapshot);
     if (t && snapshot) {
       const m = this.currentMatchup(snapshot, t);
@@ -2053,6 +2182,26 @@ export class HearthstoneWorld implements World {
         deckSource: t.deckSource,
         deckName: t.deckName,
         deckMismatch: t.deckMismatch,
+        myClass: t.me.heroClass || snapshot.me.heroClass || '',
+        oppClass: t.opponent.heroClass || snapshot.opponent.heroClass || '',
+        oppDeckCount: t.opponent.deckCount,
+        oppHandCount: snapshot.opponent.handCount,
+        savedDecks,
+        activeDeckId: this.myDecks.activeId,
+        hasOppImportedDeck: this.oppImportedDeck !== null,
+        oppDeckSource: t.opponent.deckSource,
+        oppDeckName: t.opponent.deckName,
+        oppDeckMismatch: t.opponent.deckMismatch,
+        oppSavedDecks,
+        oppActiveDeckId: this.oppDecks.activeId,
+        oppRemaining: t.opponent.remainingDeck.map((c) => ({
+          cardId: c.cardId,
+          name: c.name,
+          cost: c.cost,
+          left: c.left,
+          total: c.total,
+          prob: Math.round(c.drawProb * 1000) / 1000,
+        })),
         myRemainingCount: t.me.deckCount,
         myRemaining: t.me.remainingDeck.map((c) => ({
           cardId: c.cardId,
@@ -2093,6 +2242,13 @@ export class HearthstoneWorld implements World {
         deckSource: 'imported',
         deckName: d.name,
         deckMismatch: false,
+        myClass: d.heroClass || '',
+        oppClass: this.oppImportedDeck?.deck.heroClass || '',
+        oppDeckCount: this.oppImportedDeck?.deck.totalCards ?? 0,
+        oppHandCount: 0,
+        savedDecks,
+        activeDeckId: this.myDecks.activeId,
+        ...oppFallback,
         myRemainingCount: d.totalCards,
         myRemaining: d.cards.map((c) => ({
           cardId: c.cardId, name: c.name, cost: c.cost, left: c.count, total: c.count, prob: 0,
@@ -2113,6 +2269,13 @@ export class HearthstoneWorld implements World {
       deckSource: 'none',
       deckName: '',
       deckMismatch: false,
+      myClass: '',
+      oppClass: this.oppImportedDeck?.deck.heroClass || '',
+      oppDeckCount: this.oppImportedDeck?.deck.totalCards ?? 0,
+      oppHandCount: 0,
+      savedDecks,
+      activeDeckId: this.myDecks.activeId,
+      ...oppFallback,
       myRemainingCount: 0,
       myRemaining: [],
       myPlayed: [],
@@ -2128,14 +2291,18 @@ export class HearthstoneWorld implements World {
     const action = typeof args.action === 'string' ? args.action : 'status';
     const snapshot = this.lastSnapshot ?? this.parser.snapshot();
 
-    if (action === 'import_deck') {
+    if (action === 'import_deck' || action === 'import_opp_deck') {
+      const isOpp = action === 'import_opp_deck';
       const code = typeof args.deckCode === 'string' ? args.deckCode : '';
       const name = typeof args.deckName === 'string' ? args.deckName : '';
-      if (!code.trim()) return 'import_deck 需要提供 deckCode（暴雪卡组代码或游戏内复制的套牌分享文本）。';
-      const res = this.applyImportDeck(code, name);
+      if (!code.trim()) return `${action} 需要提供 deckCode（暴雪卡组代码或游戏内复制的套牌分享文本）。`;
+      const res = isOpp
+        ? this.importIntoBook(this.oppDecks, this.oppDeckPath, code, name)
+        : this.applyImportDeck(code, name);
       if (!res.ok) return `导入失败：${res.error}`;
       const d = res.deck;
-      const head = `已导入卡组「${d.name}」（${d.formatZh}${d.heroClass ? ` · ${d.heroClass}` : ''} · 共 ${d.totalCards} 张）。`;
+      const sideLabel = isOpp ? '对手记牌器' : '我方记牌器';
+      const head = `已导入到${sideLabel}「${d.name}」（${d.formatZh}${d.heroClass ? ` · ${d.heroClass}` : ''} · 共 ${d.totalCards} 张）。`;
       const warn = d.unknownDbfIds.length ? `\n注意：有 ${d.unknownDbfIds.length} 条 dbfId 未收录在本地卡表（多为极新卡），其余正常跟踪。` : '';
       const list = d.cards.slice(0, 12).map((c) => `${c.cost}费 ${c.name}×${c.count}`).join('、');
       return `${head}${warn}\n构成预览：${list}${d.cards.length > 12 ? ` 等 ${d.cards.length} 种单卡` : ''}`;
@@ -2143,7 +2310,12 @@ export class HearthstoneWorld implements World {
 
     if (action === 'clear_deck') {
       const had = this.clearImportedDeck();
-      return had ? '已清空当前导入的卡组代码。' : '当前本来就没有导入卡组代码。';
+      return had ? '已清空当前导入的我方卡组代码。' : '当前本来就没有导入我方卡组代码。';
+    }
+
+    if (action === 'clear_opp_deck') {
+      const had = this.clearActiveInBook(this.oppDecks, this.oppDeckPath);
+      return had ? '已清空当前导入的对手卡组代码。' : '当前本来就没有导入对手卡组代码。';
     }
 
     if (action === 'set_rank') {
@@ -3219,6 +3391,33 @@ export class HearthstoneWorld implements World {
       this.clearImportedDeck();
       return { ok: true, ...this.panelPayload() };
     }
+    if (method === 'selectDeck') {
+      const ok = this.selectInBook(this.myDecks, this.deckPath, String(args[0] ?? ''));
+      return { ok, ...this.panelPayload() };
+    }
+    if (method === 'deleteDeck') {
+      const ok = this.deleteInBook(this.myDecks, this.deckPath, String(args[0] ?? ''));
+      return { ok, ...this.panelPayload() };
+    }
+    if (method === 'importOppDeck') {
+      const res = this.importIntoBook(this.oppDecks, this.oppDeckPath, String(args[0] ?? ''), typeof args[1] === 'string' ? args[1] : '');
+      return { ok: res.ok, ...(res.ok ? {} : { error: res.error }), ...this.panelPayload() };
+    }
+    if (method === 'clearOppDeck') {
+      this.clearActiveInBook(this.oppDecks, this.oppDeckPath);
+      return { ok: true, ...this.panelPayload() };
+    }
+    if (method === 'selectOppDeck') {
+      const ok = this.selectInBook(this.oppDecks, this.oppDeckPath, String(args[0] ?? ''));
+      return { ok, ...this.panelPayload() };
+    }
+    if (method === 'deleteOppDeck') {
+      const ok = this.deleteInBook(this.oppDecks, this.oppDeckPath, String(args[0] ?? ''));
+      return { ok, ...this.panelPayload() };
+    }
+    if (method === 'searchOppDeck') {
+      return this.panelSearchOppDeck();
+    }
     if (method === 'setRank') {
       const fmtRaw = String(args[0] ?? '');
       const fmt: LadderFormat = fmtRaw === 'wild' || fmtRaw === 'twist' ? fmtRaw : 'standard';
@@ -3283,6 +3482,30 @@ export class HearthstoneWorld implements World {
    * 这条不受 mode=quiet 限制:quiet 关掉的是「她主动开口」,而这是他在问。
    * 同时把机械建议先还给面板 —— 面板立刻有字,不用等模型绕一圈。
    */
+  private async panelSearchOppDeck(): Promise<{ ok: boolean; error?: string; message?: string; status: PanelStatus; advice: PanelAdvice | null }> {
+    const snapshot = this.lastSnapshot ?? this.parser.snapshot();
+    const oppClass = snapshot?.opponent.heroClass ?? '';
+    if (!snapshot || !oppClass) {
+      return { ok: false, error: '当前未识别到对手职业，开局后再点搜索。', ...this.panelPayload() };
+    }
+    const fmt = ladderFormatFromMeta(snapshot.meta);
+    const fmtZh = fmt === 'wild' ? '狂野' : fmt === 'twist' ? '幻变' : '标准';
+    const tr = this.currentTracker(snapshot);
+    const playedCardIds = tr?.opponent.initialPlayed.map((c) => c.cardId).filter(Boolean) ?? [];
+    const res = await searchOpponentDeckCode({ format: fmt, heroClass: oppClass, playedCardIds });
+    if (!res.ok) {
+      return { ok: false, error: res.error, ...this.panelPayload() };
+    }
+    const imp = this.importIntoBook(this.oppDecks, this.oppDeckPath, res.code, res.name);
+    if (!imp.ok) {
+      return { ok: false, error: imp.error, ...this.panelPayload() };
+    }
+    const matchText = res.playedTotal > 0 ? `，命中已出 ${res.matchedCount}/${res.playedTotal} 张` : '';
+    const message = `已导入${fmtZh}「${res.name}」（${res.totalGames}场${matchText}）`;
+    this.log?.info(`面板内置搜卡组成功:${message}`);
+    return { ok: true, message, ...this.panelPayload() };
+  }
+
   private panelAsk(): { status: PanelStatus; advice: PanelAdvice | null } {
     const payload = this.panelPayload();
     const snapshot = this.lastSnapshot ?? this.parser.snapshot();
@@ -3561,8 +3784,9 @@ export class HearthstoneWorld implements World {
           return zh ? `${deckText} · ${archCount} 个职业情报缓存` : `${deckText} · ${archCount} class intel caches`;
         }),
         clear: () => {
-          unlinkManyWithRollback([this.deckPath, this.progress.path(), this.archetypes.path()]);
-          this.importedDeck = null;
+          unlinkManyWithRollback([this.deckPath, this.oppDeckPath, this.progress.path(), this.archetypes.path()]);
+          this.myDecks = { activeId: null, decks: [] };
+          this.oppDecks = { activeId: null, decks: [] };
           this.progress.clearAll();
           this.archetypes.clearAll();
           return zh ? '已清空导入卡组、天梯/竞技场进度与对手卡组情报缓存。' : 'Tracker deck, progress and matchup cache cleared.';
