@@ -1,5 +1,9 @@
 # 更新日志
 
+## 1.0.5 — 2026-11-24（更新「大肥鱼」主题扩展图标）
+
+- **视觉更新**：新增扩展图标为「大肥鱼」奇幻炉边酒馆半厚涂风圆形透明头像（ssets/icon.png，512×512），并在 package.json 的 cortico.icon 中启用。
+
 ## 1.0.4 — 2026-11-23（双职业/衍生跨职业不迷茫 + 双方独立多卡组记牌器 + 内置搜对手卡组）
 
 - **双职业/多职业与衍生/游客跨职业牌不误报**（`tools/build-card-table.mjs`、`src/data/cards.json`、`src/effects.ts`、`src/deck-code.ts`、`src/parser.ts`、`src/alerts.ts`）：
