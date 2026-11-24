@@ -260,6 +260,8 @@
 .hs-footer {
   display: flex;
   justify-content: flex-end;
+  align-items: baseline;
+  gap: 14px;
   padding-top: 4px;
 }
 

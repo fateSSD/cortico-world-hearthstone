@@ -58,6 +58,10 @@ const TEXT = {
     thoughts: '她最近想到的',
     thoughtsEmpty: '还没写过。打完一局她可能会记一句。',
     feedback: '报 bug / 提需求',
+    qqGroup: 'QQ 群 284525159',
+    qqGroupTip: '点一下复制群号 284525159',
+    qqGroupCopied: '群号已复制',
+    qqGroupFail: '复制失败 —— 手动记一下：284525159',
     calibrateBtn: '校准',
     calibrateClose: '收起',
     ladderStandard: '标准',
@@ -153,6 +157,10 @@ const TEXT = {
     thoughts: 'On her mind lately',
     thoughtsEmpty: 'Nothing yet. She writes one after a match now and then.',
     feedback: 'Report a bug / ask for a feature',
+    qqGroup: 'QQ group 284525159',
+    qqGroupTip: 'Click to copy 284525159',
+    qqGroupCopied: 'Group number copied',
+    qqGroupFail: 'Copy failed — the number is 284525159',
     calibrateBtn: 'Calibrate',
     calibrateClose: 'Hide',
     ladderStandard: 'Standard',
@@ -566,6 +574,21 @@ function mount(ctx) {
     }, 2200);
   }, { signal: ctx.signal });
   footer.append(feedback);
+
+  /* 群号跟邮箱并排：邮箱适合「写清楚了再发」，群里适合「问一句有人答」。 */
+  const group = el(doc, 'button', 'hs-feedback', t.qqGroup);
+  group.type = 'button';
+  group.title = t.qqGroupTip;
+  group.addEventListener('click', async () => {
+    const ok = await copyText(doc, '284525159');
+    group.textContent = ok ? t.qqGroupCopied : t.qqGroupFail;
+    group.disabled = true;
+    setTimeout(() => {
+      group.textContent = t.qqGroup;
+      group.disabled = false;
+    }, 2200);
+  }, { signal: ctx.signal });
+  footer.append(group);
 
   selfPlayBtn.addEventListener('click', async () => {
     if (selfPlayBtn.disabled) return;
