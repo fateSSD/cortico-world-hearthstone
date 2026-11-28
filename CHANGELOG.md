@@ -1,5 +1,14 @@
 # 更新日志
 
+## 1.0.7 — 2026-11-28（修复对手记牌器「搜卡组」HTTP 403 故障）
+
+- **切换公开构筑数据源并补全直连解压**（`src/deck-search.ts`、`test/deck-search.test.mjs`）：
+  - `hsreplay.net` 对 Node.js 请求触发 Cloudflare 拦截（`HTTP 403` / `cf-mitigated: challenge`），导致对手记牌器点击「搜卡组」持续报错。
+  - 切换至 Firestone 公开构筑统计静态 CDN（`static.zerotoheroes.com/api/constructed/stats/decks/{format}/{bracket}/last-patch/overview-from-hourly.gz.json`，按小时更新、覆盖标准/狂野/幻变全部 11 职业），标准/狂野优先拉 `competitive` 并在失败或空样本时自动降级到 `all`。
+  - 为 `node:https` 无代理直连兜底补齐 `gzip` / `br` / `deflate` 解压处理；传入自定义 `fetcher` 时跳过模块级缓存避免单测互相污染。
+
+测试：`588` 条运行，`586` 通过，`2` 跳过，`0` 失败；`verify-world.mjs` `37/37` 通过。
+
 ## 1.0.6 — 2026-11-25（面板加 QQ 群；宿主门槛按内核改到 0.2.22）
 
 - **面板页脚的反馈入口旁边多了「QQ 群 284525159」**：跟原来的「报 bug / 提需求（复制邮箱）」并排，点一下复制群号。邮箱适合写清楚了再发，群里适合问一句有人答。
